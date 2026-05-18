@@ -1,34 +1,55 @@
+# SPDX-License-Identifier: BSD-3-Clause
+
 APP := smartnic_ad
-SRC := $(wildcard src/*.c)
-OBJ := $(SRC:.c=.o)
-CFLAGS += -O3 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11 -Iinclude -Imodels
-LDLIBS += -lm
+SRCS-y := $(wildcard src/*.c)
+OBJ := $(SRCS-y:.c=.o)
 
-DPDK_CFLAGS := $(shell pkg-config --cflags libdpdk 2>/dev/null)
-DPDK_LIBS := $(shell pkg-config --libs libdpdk 2>/dev/null)
+PKGCONF ?= pkg-config
 
-ifeq ($(strip $(DPDK_CFLAGS)),)
-$(warning pkg-config could not find libdpdk. Set PKG_CONFIG_PATH to your DPDK pkgconfig directory.)
+# Check DPDK is installed
+ifneq ($(shell $(PKGCONF) --exists libdpdk && echo 0),0)
+$(error "no installation of DPDK found. Set PKG_CONFIG_PATH to your DPDK pkgconfig directory.")
 endif
 
-CFLAGS += $(DPDK_CFLAGS)
-LDLIBS += $(DPDK_LIBS)
+PC_FILE := $(shell $(PKGCONF) --path libdpdk 2>/dev/null)
 
-all: $(APP)
+CFLAGS += -O3 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11
+CFLAGS += -Iinclude -Imodels
+CFLAGS += $(shell $(PKGCONF) --cflags libdpdk)
+CFLAGS += -mcpu=cortex-a78ae          # DPU ARM CPU
+CFLAGS += -DALLOW_EXPERIMENTAL_API
 
-$(APP): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk) -lm
+LDFLAGS_STATIC = $(shell $(PKGCONF) --static --libs libdpdk) -lm
 
-%.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+# Default targets
+all: shared
+.PHONY: shared static perf log clean all
 
+shared: build/$(APP)-shared
+	ln -sf $(APP)-shared build/$(APP)
+
+static: build/$(APP)-static
+	ln -sf $(APP)-static build/$(APP)
+
+build/$(APP)-shared: $(SRCS-y) Makefile $(PC_FILE) | build
+	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS_SHARED)
+
+build/$(APP)-static: $(SRCS-y) Makefile $(PC_FILE) | build
+	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS_STATIC)
+
+# Performance build (no logs, no debug)
 perf: CFLAGS += -DAPP_ENABLE_LOGS=0 -DAPP_ENABLE_TIMING=0 -DAPP_ENABLE_CONTRACTS=0 -DNDEBUG
-perf: clean $(APP)
+perf: clean shared
 
+# Debug/log build
 log: CFLAGS += -DAPP_ENABLE_LOGS=1 -DAPP_ENABLE_TIMING=1 -DAPP_ENABLE_CONTRACTS=1
-log: clean $(APP)
+log: clean shared
+
+build:
+	@mkdir -p $@
 
 clean:
-	rm -f $(OBJ) $(APP)
-
-.PHONY: all clean perf log
+	rm -f $(OBJ)
+	rm -f build/$(APP) build/$(APP)-shared build/$(APP)-static
+	test -d build && rmdir -p build || true
