@@ -1,0 +1,68 @@
+digraph G {
+  graph [rankdir=LR, bgcolor="white", pad="0.25", nodesep="0.55", ranksep="0.65", fontname="Helvetica"];
+  node [shape=box, style="rounded,filled", fillcolor="#f9f6e8", color="#444444", fontname="Helvetica", fontsize=11];
+  edge [color="#444444", arrowsize=0.8, fontname="Helvetica", fontsize=9];
+
+  subgraph cluster_offline {
+    label="Offline Python plugins";
+    color="#b7b7b7"; style="rounded,dashed";
+    pcap [label="PCAP/CSV datasets\nIoT | DoH | ICS"];
+    train_mlp [label="export_mlp.py\nPyTorch MLP + scaler"];
+    train_bnn [label="export_bnn.py\nPyTorch BNN + scaler"];
+    train_rf [label="export_rf.py\nsklearn RF + scaler"];
+    headers [label="C headers\nmodel_mlp.h | model_bnn.h | model_rf.h", fillcolor="#e5f0ff"];
+    pcap -> train_mlp;
+    pcap -> train_bnn;
+    pcap -> train_rf;
+    train_mlp -> headers;
+    train_bnn -> headers;
+    train_rf -> headers;
+  }
+
+  subgraph cluster_runtime {
+    label="Online SmartNIC runtime (DPDK)";
+    color="#9db58c"; style="rounded,filled"; fillcolor="#eef5e8";
+    rss [label="Port RX/TX\nRSS queues"];
+    workers [label="N worker lcores\nqueue-local state", fillcolor="#fff4cc"];
+    parser [label="packet_parser.c\nIPv4/TCP + VLAN"];
+    select [label="Runtime profile select\n--profile iot|doh|ics", fillcolor="#fff4cc"];
+    iot [label="features_iot.c\n8 TCP flow features"];
+    doh [label="features_doh.c\n16 bidirectional TLS/DoH features"];
+    ics [label="features_ics.c\nModbus request/response\n16 sensor EWMA/CUSUM features"];
+    contract [label="feature_contract.c\nvalidity checks\n(optional)"];
+    norm [label="model_prepare_input()\nscaler + dimension check"];
+    dispatch [label="inference.c\nmodel dispatch\n--model mlp|rf|bnn", fillcolor="#e5f0ff"];
+    actions [label="Action\nforward | drop anomaly | log"];
+    tx [label="TX burst"];
+    rss -> workers -> parser -> select;
+    select -> iot;
+    select -> doh;
+    select -> ics;
+    iot -> contract;
+    doh -> contract;
+    ics -> contract;
+    contract -> norm -> dispatch -> actions -> tx;
+  }
+
+  subgraph cluster_kernels {
+    label="Inference microkernels";
+    color="#b7b7b7"; style="rounded,dashed";
+    mlp [label="infer_mlp.c\nscalar dense + NEON dense\nscalar tails for any layer size", fillcolor="#e5f0ff"];
+    rf [label="infer_rf.c\niterative tree traversal\nstatic arrays, no JSON runtime", fillcolor="#e5f0ff"];
+    bnn [label="infer_bnn.c\nXNOR-popcount\n64-bit tail masking", fillcolor="#e5f0ff"];
+  }
+
+  subgraph cluster_log {
+    label="Optional logging plane";
+    color="#b7b7b7"; style="rounded,dashed";
+    ring [label="rte_ring + mempool\nnonblocking enqueue"];
+    logcore [label="logger lcore\nCSV writer"];
+    ring -> logcore;
+  }
+
+  headers -> dispatch [style=dashed, label="compile-time include"];
+  dispatch -> mlp;
+  dispatch -> rf;
+  dispatch -> bnn;
+  actions -> ring [style=dashed, label="APP_ENABLE_LOGS=1\n--log-mode async"];
+}
