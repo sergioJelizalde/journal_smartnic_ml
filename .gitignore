@@ -1,0 +1,19 @@
+# Datasets — too large for GitHub (use local paths or DVC)
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Build artifacts
+*.o
+*.so
+*.a
+build/
+
+# Generated model files (large binaries)
+*.onnx
+*.pt
+*.pth
