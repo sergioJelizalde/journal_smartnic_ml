@@ -1,0 +1,103 @@
+{
+  "features": [
+    "client_pkt_max",
+    "n_client",
+    "bytes_fraction_client",
+    "n_server",
+    "pkt_fraction_client",
+    "client_bytes",
+    "server_pkt_max",
+    "size_min",
+    "size_mean",
+    "server_pkt_mean",
+    "dir_switches",
+    "server_bytes",
+    "size_max",
+    "client_pkt_min",
+    "server_pkt_min",
+    "client_pkt_mean"
+  ],
+  "n_classes": 2,
+  "models": [
+    {
+      "tag": "16_8",
+      "hidden_sizes": [
+        16,
+        8
+      ],
+      "layer_sizes": [
+        16,
+        16,
+        8,
+        1
+      ],
+      "c_header": "model_16_8.h",
+      "onnx": "model_16_8.onnx"
+    },
+    {
+      "tag": "32_16",
+      "hidden_sizes": [
+        32,
+        16
+      ],
+      "layer_sizes": [
+        16,
+        32,
+        16,
+        1
+      ],
+      "c_header": "model_32_16.h",
+      "onnx": "model_32_16.onnx"
+    },
+    {
+      "tag": "64_32",
+      "hidden_sizes": [
+        64,
+        32
+      ],
+      "layer_sizes": [
+        16,
+        64,
+        32,
+        1
+      ],
+      "c_header": "model_64_32.h",
+      "onnx": "model_64_32.onnx"
+    },
+    {
+      "tag": "128_64_16",
+      "hidden_sizes": [
+        128,
+        64,
+        16
+      ],
+      "layer_sizes": [
+        16,
+        128,
+        64,
+        16,
+        1
+      ],
+      "c_header": "model_128_64_16.h",
+      "onnx": "model_128_64_16.onnx"
+    },
+    {
+      "tag": "256_128_32",
+      "hidden_sizes": [
+        256,
+        128,
+        32
+      ],
+      "layer_sizes": [
+        16,
+        256,
+        128,
+        32,
+        1
+      ],
+      "c_header": "model_256_128_32.h",
+      "onnx": "model_256_128_32.onnx"
+    }
+  ],
+  "feature_stats_header": "feature_stats.h"
+}
