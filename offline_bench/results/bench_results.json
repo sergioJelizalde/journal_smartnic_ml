@@ -1,0 +1,20 @@
+{"platform": "cpu-x86", "kernel": "onnx", "model": "16_8", "num_features": 16, "avg_latency_ns": 12880.126340314746, "p50_ns": 12803.997378796339, "p95_ns": 13204.989954829216, "p99_ns": 21850.981283932924, "throughput_ips": 77638.98998956275}
+{"platform": "cpu-x86", "kernel": "onnx", "model": "32_16", "num_features": 16, "avg_latency_ns": 12311.790299136192, "p50_ns": 12513.017281889915, "p95_ns": 13024.022337049246, "p99_ns": 20990.031771361828, "throughput_ips": 81222.95585802506}
+{"platform": "cpu-x86", "kernel": "onnx", "model": "64_32", "num_features": 16, "avg_latency_ns": 12530.322540551424, "p50_ns": 12783.973943442106, "p95_ns": 13504.992239177227, "p99_ns": 22582.01129734516, "throughput_ips": 79806.40536296944}
+{"platform": "cpu-x86", "kernel": "onnx", "model": "128_64_16", "num_features": 16, "avg_latency_ns": 14312.226040055975, "p50_ns": 14316.989108920097, "p95_ns": 15258.96368548274, "p99_ns": 23865.02455919981, "throughput_ips": 69870.33304262214}
+{"platform": "cpu-x86", "kernel": "onnx", "model": "256_128_32", "num_features": 16, "avg_latency_ns": 18877.90529988706, "p50_ns": 18554.972484707832, "p95_ns": 19868.02089959383, "p99_ns": 29655.988328158855, "throughput_ips": 52971.97883527801}
+{"platform":"cpu-x86","kernel":"scalar","model":"16_8","num_features":16,"num_layers":3,"avg_latency_ns":226.5,"p50_ns":200,"p95_ns":211,"p99_ns":211,"throughput_ips":4414887}
+{"platform":"cpu-x86","kernel":"scalar","model":"32_16","num_features":16,"num_layers":3,"avg_latency_ns":510.6,"p50_ns":481,"p95_ns":491,"p99_ns":531,"throughput_ips":1958430}
+{"platform":"cpu-x86","kernel":"scalar","model":"64_32","num_features":16,"num_layers":3,"avg_latency_ns":1546.7,"p50_ns":1513,"p95_ns":1562,"p99_ns":2124,"throughput_ips":646528}
+{"platform":"cpu-x86","kernel":"scalar","model":"128_64_16","num_features":16,"num_layers":4,"avg_latency_ns":7065.2,"p50_ns":6973,"p95_ns":7073,"p99_ns":8756,"throughput_ips":141538}
+{"platform":"cpu-x86","kernel":"scalar","model":"256_128_32","num_features":16,"num_layers":4,"avg_latency_ns":40945.0,"p50_ns":40576,"p95_ns":44704,"p99_ns":47881,"throughput_ips":24423}
+{"platform":"cpu-x86","kernel":"avx","model":"16_8","num_features":16,"num_layers":3,"avg_latency_ns":100.0,"p50_ns":80,"p95_ns":91,"p99_ns":100,"throughput_ips":9995328}
+{"platform":"cpu-x86","kernel":"avx","model":"32_16","num_features":16,"num_layers":3,"avg_latency_ns":167.1,"p50_ns":141,"p95_ns":151,"p99_ns":161,"throughput_ips":5986119}
+{"platform":"cpu-x86","kernel":"avx","model":"64_32","num_features":16,"num_layers":3,"avg_latency_ns":376.1,"p50_ns":360,"p95_ns":371,"p99_ns":411,"throughput_ips":2659122}
+{"platform":"cpu-x86","kernel":"avx","model":"128_64_16","num_features":16,"num_layers":4,"avg_latency_ns":1335.5,"p50_ns":1302,"p95_ns":1323,"p99_ns":1363,"throughput_ips":748770}
+{"platform":"cpu-x86","kernel":"avx","model":"256_128_32","num_features":16,"num_layers":4,"avg_latency_ns":5821.1,"p50_ns":5260,"p95_ns":5360,"p99_ns":5560,"throughput_ips":171788}
+{"platform":"cpu-x86","kernel":"onnx-c","model":"16_8","avg_latency_ns":7469.6,"p50_ns":7314,"p95_ns":7454,"p99_ns":8636,"throughput_ips":133875}
+{"platform":"cpu-x86","kernel":"onnx-c","model":"32_16","avg_latency_ns":7474.4,"p50_ns":7304,"p95_ns":7424,"p99_ns":8626,"throughput_ips":133790}
+{"platform":"cpu-x86","kernel":"onnx-c","model":"64_32","avg_latency_ns":7562.7,"p50_ns":7414,"p95_ns":7554,"p99_ns":12884,"throughput_ips":132227}
+{"platform":"cpu-x86","kernel":"onnx-c","model":"128_64_16","avg_latency_ns":9301.6,"p50_ns":8997,"p95_ns":9157,"p99_ns":15349,"throughput_ips":107508}
+{"platform":"cpu-x86","kernel":"onnx-c","model":"256_128_32","avg_latency_ns":11840.9,"p50_ns":11462,"p95_ns":11681,"p99_ns":18605,"throughput_ips":84453}
