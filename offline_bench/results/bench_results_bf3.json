@@ -1,10 +1,20 @@
-{"platform":"bf3-arm","kernel":"scalar","model":"16_8","num_features":16,"num_layers":3,"avg_latency_ns":374.8,"p50_ns":357,"p95_ns":370,"p99_ns":373,"throughput_ips":2668260}
-{"platform":"bf3-arm","kernel":"scalar","model":"32_16","num_features":16,"num_layers":3,"avg_latency_ns":903.6,"p50_ns":886,"p95_ns":899,"p99_ns":902,"throughput_ips":1106735}
-{"platform":"bf3-arm","kernel":"scalar","model":"64_32","num_features":16,"num_layers":3,"avg_latency_ns":2592.8,"p50_ns":2581,"p95_ns":2595,"p99_ns":2598,"throughput_ips":385682}
-{"platform":"bf3-arm","kernel":"scalar","model":"128_64_16","num_features":16,"num_layers":4,"avg_latency_ns":9982.0,"p50_ns":9961,"p95_ns":9985,"p99_ns":9995,"throughput_ips":100180}
-{"platform":"bf3-arm","kernel":"scalar","model":"256_128_32","num_features":16,"num_layers":4,"avg_latency_ns":74081.2,"p50_ns":74021,"p95_ns":74140,"p99_ns":76315,"throughput_ips":13499}
-{"platform":"bf3-arm","kernel":"neon","model":"16_8","num_features":16,"num_layers":3,"avg_latency_ns":160.8,"p50_ns":146,"p95_ns":159,"p99_ns":160,"throughput_ips":6219361}
-{"platform":"bf3-arm","kernel":"neon","model":"32_16","num_features":16,"num_layers":3,"avg_latency_ns":290.5,"p50_ns":276,"p95_ns":287,"p99_ns":290,"throughput_ips":3441787}
-{"platform":"bf3-arm","kernel":"neon","model":"64_32","num_features":16,"num_layers":3,"avg_latency_ns":723.3,"p50_ns":713,"p95_ns":726,"p99_ns":730,"throughput_ips":1382524}
-{"platform":"bf3-arm","kernel":"neon","model":"128_64_16","num_features":16,"num_layers":4,"avg_latency_ns":2570.0,"p50_ns":2552,"p95_ns":2567,"p99_ns":2572,"throughput_ips":389112}
-{"platform":"bf3-arm","kernel":"neon","model":"256_128_32","num_features":16,"num_layers":4,"avg_latency_ns":18867.0,"p50_ns":18847,"p95_ns":18891,"p99_ns":18924,"throughput_ips":53003}
+{"platform": "bf3-arm", "kernel": "onnx", "model": "16_8", "num_features": 16, "avg_latency_ns": 64709.90434056148, "p50_ns": 69894.01299506426, "p95_ns": 75909.01805087924, "p99_ns": 102912.01760992408, "throughput_ips": 15453.584890762691}
+{"platform": "bf3-arm", "kernel": "onnx", "model": "32_16", "num_features": 16, "avg_latency_ns": 65216.67749970219, "p50_ns": 70084.00280028582, "p95_ns": 81863.95280063152, "p99_ns": 114139.98436182737, "throughput_ips": 15333.50115857353}
+{"platform": "bf3-arm", "kernel": "onnx", "model": "64_32", "num_features": 16, "avg_latency_ns": 75112.3629603535, "p50_ns": 80575.0023573637, "p95_ns": 88697.9978531599, "p99_ns": 118848.98412972689, "throughput_ips": 13313.387578125179}
+{"platform": "bf3-arm", "kernel": "onnx", "model": "128_64_16", "num_features": 16, "avg_latency_ns": 81970.85080086254, "p50_ns": 84055.00557273626, "p95_ns": 100044.99927163124, "p99_ns": 136018.03220808506, "throughput_ips": 12199.458590827235}
+{"platform": "bf3-arm", "kernel": "onnx", "model": "256_128_32", "num_features": 16, "avg_latency_ns": 106937.21225950867, "p50_ns": 118455.96600323915, "p95_ns": 138706.00378140807, "p99_ns": 169745.0061328709, "throughput_ips": 9351.281736924853}
+{"platform":"bf3-arm","kernel":"scalar","model":"16_8","num_features":16,"num_layers":3,"avg_latency_ns":374.7,"p50_ns":357,"p95_ns":370,"p99_ns":373,"throughput_ips":2669090}
+{"platform":"bf3-arm","kernel":"scalar","model":"32_16","num_features":16,"num_layers":3,"avg_latency_ns":903.4,"p50_ns":886,"p95_ns":899,"p99_ns":903,"throughput_ips":1106913}
+{"platform":"bf3-arm","kernel":"scalar","model":"64_32","num_features":16,"num_layers":3,"avg_latency_ns":2593.1,"p50_ns":2581,"p95_ns":2594,"p99_ns":2598,"throughput_ips":385632}
+{"platform":"bf3-arm","kernel":"scalar","model":"128_64_16","num_features":16,"num_layers":4,"avg_latency_ns":9984.5,"p50_ns":9962,"p95_ns":9985,"p99_ns":9994,"throughput_ips":100155}
+{"platform":"bf3-arm","kernel":"scalar","model":"256_128_32","num_features":16,"num_layers":4,"avg_latency_ns":73986.3,"p50_ns":73927,"p95_ns":74061,"p99_ns":76162,"throughput_ips":13516}
+{"platform":"bf3-arm","kernel":"neon","model":"16_8","num_features":16,"num_layers":3,"avg_latency_ns":160.9,"p50_ns":150,"p95_ns":163,"p99_ns":166,"throughput_ips":6216522}
+{"platform":"bf3-arm","kernel":"neon","model":"32_16","num_features":16,"num_layers":3,"avg_latency_ns":291.7,"p50_ns":277,"p95_ns":287,"p99_ns":290,"throughput_ips":3427656}
+{"platform":"bf3-arm","kernel":"neon","model":"64_32","num_features":16,"num_layers":3,"avg_latency_ns":734.6,"p50_ns":716,"p95_ns":730,"p99_ns":733,"throughput_ips":1361303}
+{"platform":"bf3-arm","kernel":"neon","model":"128_64_16","num_features":16,"num_layers":4,"avg_latency_ns":2568.1,"p50_ns":2551,"p95_ns":2564,"p99_ns":2568,"throughput_ips":389390}
+{"platform":"bf3-arm","kernel":"neon","model":"256_128_32","num_features":16,"num_layers":4,"avg_latency_ns":18900.4,"p50_ns":18877,"p95_ns":18940,"p99_ns":18980,"throughput_ips":52909}
+{"platform":"bf3-arm","kernel":"onnx-c","model":"16_8","avg_latency_ns":14926.9,"p50_ns":13888,"p95_ns":14038,"p99_ns":14481,"throughput_ips":66993}
+{"platform":"bf3-arm","kernel":"onnx-c","model":"32_16","avg_latency_ns":14438.6,"p50_ns":14011,"p95_ns":14135,"p99_ns":14298,"throughput_ips":69259}
+{"platform":"bf3-arm","kernel":"onnx-c","model":"64_32","avg_latency_ns":14766.9,"p50_ns":14318,"p95_ns":14681,"p99_ns":15447,"throughput_ips":67719}
+{"platform":"bf3-arm","kernel":"onnx-c","model":"128_64_16","avg_latency_ns":17554.5,"p50_ns":17325,"p95_ns":17908,"p99_ns":19523,"throughput_ips":56966}
+{"platform":"bf3-arm","kernel":"onnx-c","model":"256_128_32","avg_latency_ns":30609.2,"p50_ns":29548,"p95_ns":31470,"p99_ns":46477,"throughput_ips":32670}
