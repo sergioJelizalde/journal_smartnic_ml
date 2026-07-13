@@ -1,0 +1,32 @@
+# Compiler and linker settings
+CC = gcc
+CFLAGS = -O2 -Wall -Wextra -std=c11
+LDFLAGS = -lm
+
+# Find XNNPACK and pthreads compilation and linking flags using pkg-config
+XNNPACK_CFLAGS = $(shell pkg-config --cflags xnnpack)
+XNNPACK_LIBS = $(shell pkg-config --libs xnnpack)
+PTHREAD_CFLAGS = $(shell pkg-config --cflags pthread)
+PTHREAD_LIBS = $(shell pkg-config --libs pthread)
+
+# Combine all flags
+CFLAGS += $(XNNPACK_CFLAGS) $(PTHREAD_CFLAGS)
+LDFLAGS += $(XNNPACK_LIBS) $(PTHREAD_LIBS)
+
+# Target executable
+TARGET = xnnpack_benchmark
+SOURCE = xnnpack_benchmark.c
+
+# Default target
+all: $(TARGET)
+
+# Rule to build the executable
+$(TARGET): $(SOURCE)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+# Clean up build artifacts
+clean:
+	rm -f $(TARGET)
+
+# Phony targets (targets that are not actual files)
+.PHONY: all clean
