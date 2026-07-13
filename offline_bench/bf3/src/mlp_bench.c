@@ -1,0 +1,293 @@
+/*
+ * mlp_bench.c — latency benchmark for one MLP kernel at a time.
+ *
+ * Build (pick exactly one kernel define) and one model header:
+ *
+ *   Scalar (x86 or ARM):
+ *     gcc -O3 -DUSE_SCALAR -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_scalar -lm
+ *
+ *   NEON (BlueField-3 / aarch64 only):
+ *     gcc -O3 -march=armv8-a+simd -DUSE_NEON -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_neon -lm
+ *
+ *   AVX2 (x86 host only):
+ *     gcc -O3 -mavx2 -mfma -DUSE_AVX -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_avx -lm
+ *
+ *   XNNPACK (either platform, needs XNNPACK built/installed):
+ *     gcc -O3 -DUSE_XNNPACK -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_xnn \
+ *         -I/path/to/XNNPACK/include -L/path/to/XNNPACK/build -lXNNPACK -lpthreadpool -lm -lpthread
+ *
+ * Output: latencies.csv  (columns: iter,latency_ns)
+ * Rename the CSV after each run, e.g. latencies_64_32_neon.csv, before the
+ * next run overwrites it.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+#include <stdint.h>
+
+#if defined(USE_NEON)
+#include <arm_neon.h>
+#elif defined(USE_AVX)
+#include <immintrin.h>
+#elif defined(USE_XNNPACK)
+#include <xnnpack.h>
+#endif
+
+#ifndef MODEL_HEADER
+#error "Define MODEL_HEADER, e.g. -DMODEL_HEADER='\"mlp_64_32.h\"'"
+#endif
+#include "feature_stats.h"
+#include MODEL_HEADER
+
+#ifndef WARMUP_ITERS
+#define WARMUP_ITERS 2000
+#endif
+#ifndef MEASURE_ITERS
+#define MEASURE_ITERS 10000
+#endif
+
+static inline float randomf(void) { return (float)rand() / (float)RAND_MAX; }
+
+static inline uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* ---------------------------------------------------------------------- */
+#if defined(USE_SCALAR) || defined(USE_NEON) || defined(USE_AVX)
+
+static int predict_mlp_scalar(const float *in_features, float *buf_a, float *buf_b) {
+    float *in_buf = buf_a, *out_buf = buf_b;
+    memcpy(in_buf, in_features, LAYER_SIZES[0] * sizeof(float));
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        int is_output = (L == NUM_LAYERS - 1);
+        int size_in = LAYER_SIZES[L], size_out = LAYER_SIZES[L + 1];
+        for (int j = 0; j < size_out; j++) {
+            float acc = BIASES[L][j];
+            for (int k = 0; k < size_in; k++)
+                acc += WEIGHTS[L][k * size_out + j] * in_buf[k];
+            out_buf[j] = is_output ? acc : (acc > 0.0f ? acc : 0.0f);
+        }
+        float *tmp = in_buf; in_buf = out_buf; out_buf = tmp;
+    }
+    int final_size = LAYER_SIZES[NUM_LAYERS], best = 0;
+    float best_v = in_buf[0];
+    for (int i = 1; i < final_size; i++)
+        if (in_buf[i] > best_v) { best_v = in_buf[i]; best = i; }
+    return best;
+}
+#endif
+
+#if defined(USE_NEON)
+static void layer_forward_neon(const float *W, const float *B, const float *in,
+                                float *out, int size_in, int size_out, int is_output) {
+    int j = 0;
+    for (; j + 4 <= size_out; j += 4) {
+        float32x4_t acc = vld1q_f32(&B[j]);
+        for (int k = 0; k < size_in; k++)
+            acc = vfmaq_f32(acc, vdupq_n_f32(in[k]), vld1q_f32(&W[k * size_out + j]));
+        if (!is_output) acc = vmaxq_f32(acc, vdupq_n_f32(0.0f));
+        vst1q_f32(&out[j], acc);
+    }
+    for (; j < size_out; j++) {
+        float a = B[j];
+        for (int k = 0; k < size_in; k++) a += W[k * size_out + j] * in[k];
+        out[j] = is_output ? a : (a > 0.0f ? a : 0.0f);
+    }
+}
+static int predict_mlp_neon(const float *in_features, float *buf_a, float *buf_b) {
+    float *in_buf = buf_a, *out_buf = buf_b;
+    memcpy(in_buf, in_features, LAYER_SIZES[0] * sizeof(float));
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        layer_forward_neon(WEIGHTS[L], BIASES[L], in_buf, out_buf,
+                            LAYER_SIZES[L], LAYER_SIZES[L + 1], (L == NUM_LAYERS - 1));
+        float *tmp = in_buf; in_buf = out_buf; out_buf = tmp;
+    }
+    int final_size = LAYER_SIZES[NUM_LAYERS], best = 0;
+    float best_v = in_buf[0];
+    for (int i = 1; i < final_size; i++)
+        if (in_buf[i] > best_v) { best_v = in_buf[i]; best = i; }
+    return best;
+}
+#endif
+
+#if defined(USE_AVX)
+static void layer_forward_avx2(const float *W, const float *B, const float *in,
+                                float *out, int size_in, int size_out, int is_output) {
+    int j = 0;
+    for (; j + 8 <= size_out; j += 8) {
+        __m256 acc = _mm256_loadu_ps(&B[j]);
+        for (int k = 0; k < size_in; k++) {
+            __m256 wv = _mm256_loadu_ps(&W[k * size_out + j]);
+            __m256 ib = _mm256_set1_ps(in[k]);
+            acc = _mm256_fmadd_ps(ib, wv, acc);
+        }
+        if (!is_output) acc = _mm256_max_ps(acc, _mm256_setzero_ps());
+        _mm256_storeu_ps(&out[j], acc);
+    }
+    for (; j + 4 <= size_out; j += 4) {
+        __m128 acc = _mm_loadu_ps(&B[j]);
+        for (int k = 0; k < size_in; k++) {
+            __m128 wv = _mm_loadu_ps(&W[k * size_out + j]);
+            __m128 ib = _mm_set1_ps(in[k]);
+            acc = _mm_fmadd_ps(ib, wv, acc);
+        }
+        if (!is_output) acc = _mm_max_ps(acc, _mm_setzero_ps());
+        _mm_storeu_ps(&out[j], acc);
+    }
+    for (; j < size_out; j++) {
+        float a = B[j];
+        for (int k = 0; k < size_in; k++) a += W[k * size_out + j] * in[k];
+        out[j] = is_output ? a : (a > 0.0f ? a : 0.0f);
+    }
+}
+static int predict_mlp_avx(const float *in_features, float *buf_a, float *buf_b) {
+    float *in_buf = buf_a, *out_buf = buf_b;
+    memcpy(in_buf, in_features, LAYER_SIZES[0] * sizeof(float));
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        layer_forward_avx2(WEIGHTS[L], BIASES[L], in_buf, out_buf,
+                            LAYER_SIZES[L], LAYER_SIZES[L + 1], (L == NUM_LAYERS - 1));
+        float *tmp = in_buf; in_buf = out_buf; out_buf = tmp;
+    }
+    int final_size = LAYER_SIZES[NUM_LAYERS], best = 0;
+    float best_v = in_buf[0];
+    for (int i = 1; i < final_size; i++)
+        if (in_buf[i] > best_v) { best_v = in_buf[i]; best = i; }
+    return best;
+}
+#endif
+
+/* ---------------------------------------------------------------------- */
+#if defined(USE_XNNPACK)
+/* Builds a static-weight subgraph: FC(+ReLU clamp) chained per hidden layer,
+ * final FC with no clamp (argmax of logits == argmax of softmax, so softmax
+ * is skipped -- it doesn't change the predicted class). */
+static xnn_subgraph_t g_subgraph = NULL;
+static xnn_runtime_t  g_runtime  = NULL;
+static uint32_t g_input_id, g_output_id;
+static struct xnn_dynamic_alloc_ctx {int unused;} g_unused;
+static float *g_input_buf, *g_output_buf;
+
+static void build_xnnpack_runtime(void) {
+    xnn_status st = xnn_initialize(NULL);
+    if (st != xnn_status_success) { fprintf(stderr, "xnn_initialize failed\n"); exit(1); }
+
+    st = xnn_create_subgraph(/*external_value_ids=*/2, /*flags=*/0, &g_subgraph);
+    if (st != xnn_status_success) { fprintf(stderr, "xnn_create_subgraph failed\n"); exit(1); }
+
+    uint32_t cur_id, next_id;
+    size_t dims_in[2]  = {1, (size_t)LAYER_SIZES[0]};
+    xnn_define_tensor_value(g_subgraph, xnn_datatype_fp32, 2, dims_in, NULL,
+                             /*external_id=*/0, XNN_VALUE_FLAG_EXTERNAL_INPUT, &g_input_id);
+    cur_id = g_input_id;
+
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        int size_in  = LAYER_SIZES[L];
+        int size_out = LAYER_SIZES[L + 1];
+        int is_output = (L == NUM_LAYERS - 1);
+
+        size_t w_dims[2] = {(size_t)size_out, (size_t)size_in};
+        uint32_t w_id;
+        xnn_define_tensor_value(g_subgraph, xnn_datatype_fp32, 2, w_dims,
+                                 WEIGHTS_XNN[L], XNN_INVALID_VALUE_ID, 0, &w_id);
+        size_t b_dims[1] = {(size_t)size_out};
+        uint32_t b_id;
+        xnn_define_tensor_value(g_subgraph, xnn_datatype_fp32, 1, b_dims,
+                                 BIASES_XNN[L], XNN_INVALID_VALUE_ID, 0, &b_id);
+
+        size_t out_dims[2] = {1, (size_t)size_out};
+        uint32_t flags = is_output ? XNN_VALUE_FLAG_EXTERNAL_OUTPUT : 0;
+        uint32_t out_ext_id = is_output ? 1 : XNN_INVALID_VALUE_ID;
+        xnn_define_tensor_value(g_subgraph, xnn_datatype_fp32, 2, out_dims, NULL,
+                                 out_ext_id, flags, &next_id);
+
+        float out_min = is_output ? -INFINITY : 0.0f;   /* ReLU on hidden layers */
+        float out_max = INFINITY;
+        xnn_define_fully_connected(g_subgraph, out_min, out_max,
+                                    cur_id, w_id, b_id, next_id, /*flags=*/0);
+        if (is_output) g_output_id = next_id;
+        cur_id = next_id;
+    }
+
+    size_t num_threads = 1;
+    pthreadpool_t threadpool = pthreadpool_create(num_threads);
+    st = xnn_create_runtime_v4(g_subgraph, NULL, NULL, threadpool, 0, &g_runtime);
+    if (st != xnn_status_success) { fprintf(stderr, "xnn_create_runtime failed\n"); exit(1); }
+
+    posix_memalign((void**)&g_input_buf, 16, LAYER_SIZES[0] * sizeof(float));
+    posix_memalign((void**)&g_output_buf, 16, LAYER_SIZES[NUM_LAYERS] * sizeof(float));
+}
+
+static int predict_mlp_xnnpack(const float *in_features) {
+    memcpy(g_input_buf, in_features, LAYER_SIZES[0] * sizeof(float));
+    struct xnn_external_value ext[2] = {
+        {0, g_input_buf},
+        {1, g_output_buf},
+    };
+    xnn_setup_runtime(g_runtime, 2, ext);
+    xnn_invoke_runtime(g_runtime);
+
+    int final_size = LAYER_SIZES[NUM_LAYERS], best = 0;
+    float best_v = g_output_buf[0];
+    for (int i = 1; i < final_size; i++)
+        if (g_output_buf[i] > best_v) { best_v = g_output_buf[i]; best = i; }
+    return best;
+}
+#endif
+
+/* ---------------------------------------------------------------------- */
+int main(void) {
+    srand(12345);
+
+    int max_neurons = 0;
+    for (int i = 0; i <= NUM_LAYERS; i++)
+        if (LAYER_SIZES[i] > max_neurons) max_neurons = LAYER_SIZES[i];
+
+    float *scratch_a = NULL, *scratch_b = NULL, *raw_input, *input;
+#if !defined(USE_XNNPACK)
+    posix_memalign((void**)&scratch_a, 16, max_neurons * sizeof(float));
+    posix_memalign((void**)&scratch_b, 16, max_neurons * sizeof(float));
+#endif
+    posix_memalign((void**)&raw_input, 16, LAYER_SIZES[0] * sizeof(float));
+    posix_memalign((void**)&input,     16, LAYER_SIZES[0] * sizeof(float));
+
+#if defined(USE_XNNPACK)
+    build_xnnpack_runtime();
+#endif
+
+    FILE *out = fopen("latencies.csv", "w");
+    if (!out) { perror("fopen"); return 1; }
+    fprintf(out, "iter,latency_ns\n");
+
+    int total_iters = WARMUP_ITERS + MEASURE_ITERS;
+    for (int it = 0; it < total_iters; it++) {
+        for (int k = 0; k < LAYER_SIZES[0]; k++) raw_input[k] = randomf();
+        for (int k = 0; k < LAYER_SIZES[0]; k++)
+            input[k] = (raw_input[k] - FEATURE_MEAN[k]) / FEATURE_STD[k];
+
+        uint64_t t0 = now_ns();
+#if defined(USE_SCALAR)
+        volatile int cls = predict_mlp_scalar(input, scratch_a, scratch_b);
+#elif defined(USE_NEON)
+        volatile int cls = predict_mlp_neon(input, scratch_a, scratch_b);
+#elif defined(USE_AVX)
+        volatile int cls = predict_mlp_avx(input, scratch_a, scratch_b);
+#elif defined(USE_XNNPACK)
+        volatile int cls = predict_mlp_xnnpack(input);
+#else
+#error "Define one of USE_SCALAR / USE_NEON / USE_AVX / USE_XNNPACK"
+#endif
+        uint64_t t1 = now_ns();
+        (void)cls;
+
+        if (it >= WARMUP_ITERS)
+            fprintf(out, "%d,%llu\n", it - WARMUP_ITERS, (unsigned long long)(t1 - t0));
+    }
+
+    fclose(out);
+    printf("Done. %d warmup + %d measured iters -> latencies.csv\n", WARMUP_ITERS, MEASURE_ITERS);
+    return 0;
+}
