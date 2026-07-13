@@ -168,11 +168,10 @@ static int predict_mlp_avx(const float *in_features, float *buf_a, float *buf_b)
 static xnn_subgraph_t g_subgraph = NULL;
 static xnn_runtime_t  g_runtime  = NULL;
 static uint32_t g_input_id, g_output_id;
-static struct xnn_dynamic_alloc_ctx {int unused;} g_unused;
 static float *g_input_buf, *g_output_buf;
 
 static void build_xnnpack_runtime(void) {
-    xnn_status st = xnn_initialize(NULL);
+    enum xnn_status st = xnn_initialize(NULL);
     if (st != xnn_status_success) { fprintf(stderr, "xnn_initialize failed\n"); exit(1); }
 
     st = xnn_create_subgraph(/*external_value_ids=*/2, /*flags=*/0, &g_subgraph);
@@ -214,7 +213,7 @@ static void build_xnnpack_runtime(void) {
 
     size_t num_threads = 1;
     pthreadpool_t threadpool = pthreadpool_create(num_threads);
-    st = xnn_create_runtime_v4(g_subgraph, NULL, NULL, threadpool, 0, &g_runtime);
+    st = xnn_create_runtime_v2(g_subgraph, threadpool, /*flags=*/0, &g_runtime);
     if (st != xnn_status_success) { fprintf(stderr, "xnn_create_runtime failed\n"); exit(1); }
 
     posix_memalign((void**)&g_input_buf, 16, LAYER_SIZES[0] * sizeof(float));
