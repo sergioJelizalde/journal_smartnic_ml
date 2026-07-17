@@ -13,8 +13,7 @@
  *     gcc -O3 -mavx2 -mfma -DUSE_AVX -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_avx -lm
  *
  *   XNNPACK (either platform, needs XNNPACK built/installed):
- *     gcc -O3 -DUSE_XNNPACK -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_xnn \
- *         -I/path/to/XNNPACK/include -L/path/to/XNNPACK/build -lXNNPACK -lpthreadpool -lm -lpthread
+ *     gcc -O3 -DUSE_XNNPACK -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_xnn -lXNNPACK -lpthreadpool -lm -lpthread
  *
  *   GENERATED (shape-specialized NEON, aarch64 only). First run the code
  *   generator with the SAME layer sizes as the model header:
@@ -24,8 +23,7 @@
  *
  *   HARDCODED (weight-hardcoded NEON, aarch64 only). From train_export_hardcoded.py:
  *     python3 train_export_hardcoded.py --csv flows.csv --hidden 64 32 --backend torch
- *     gcc -O3 -march=armv8-a+simd -DUSE_HARDCODED \
- *         -DMODEL_HEADER='"mlp_flow_model.h"' mlp_bench.c -o bench_hc -lm
+ *     gcc -O3 -march=armv8-a+simd -DUSE_HARDCODED -DMODEL_HEADER='"mlp_flow_model.h"' mlp_bench.c -o bench_hc -lm
  *     gcc -O3 -march=armv8-a+simd -DUSE_HARDCODED_RAW \
  *         -DMODEL_HEADER='"mlp_flow_model.h"' mlp_bench.c -o bench_hc_raw -lm
  *
@@ -245,6 +243,7 @@ static void build_xnnpack_runtime(void) {
 
     posix_memalign((void**)&g_input_buf, 16, LAYER_SIZES[0] * sizeof(float));
     posix_memalign((void**)&g_output_buf, 16, LAYER_SIZES[NUM_LAYERS] * sizeof(float));
+    xnn_setup_runtime(g_runtime, 2, ext);
 }
 
 static int predict_mlp_xnnpack(const float *in_features) {
@@ -253,7 +252,7 @@ static int predict_mlp_xnnpack(const float *in_features) {
         {0, g_input_buf},
         {1, g_output_buf},
     };
-    xnn_setup_runtime(g_runtime, 2, ext);
+    
     xnn_invoke_runtime(g_runtime);
 
     int final_size = LAYER_SIZES[NUM_LAYERS], best = 0;
