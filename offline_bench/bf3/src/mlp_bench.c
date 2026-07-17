@@ -19,8 +19,7 @@
  *   GENERATED (shape-specialized NEON, aarch64 only). First run the code
  *   generator with the SAME layer sizes as the model header:
  *     python3 gen_neon_mlp.py 64 32 16 2 -o mlp_generated.h
- *     gcc -O3 -march=armv8-a+simd -DUSE_GENERATED \
- *         -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_gen -lm
+ *     gcc -O3 -march=armv8-a+simd -DUSE_GENERATED -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_gen -lm
  *
  * Output: latencies.csv  (columns: iter,latency_ns)
  * Rename the CSV after each run, e.g. latencies_64_32_neon.csv, before the
