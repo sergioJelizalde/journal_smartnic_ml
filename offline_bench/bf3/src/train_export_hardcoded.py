@@ -29,8 +29,7 @@ Outputs (default names, see -o/--prefix):
 
 Usage:
   # train from CSV (last column = label by default) and export everything
-  python3 train_export_hardcoded.py --csv flows.csv --hidden 64 32 \
-      --epochs 60 --backend torch
+  python3 train_export_hardcoded.py --csv flows.csv --hidden 64 32 --epochs 60 --backend torch
 
   # re-export from previously saved weights (skip training)
   python3 train_export_hardcoded.py --from-npz model.npz
