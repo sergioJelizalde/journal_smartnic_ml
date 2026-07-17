@@ -4,17 +4,16 @@
  * Build (pick exactly one kernel define) and one model header:
  *
  *   Scalar (x86 or ARM):
- *     gcc -O3 -DUSE_SCALAR -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_scalar -lm
+ *     gcc -O3 -DUSE_SCALAR -DMODEL_HEADER='"model_64_32.h"' mlp_bench.c -o bench_scalar -lm
  *
  *   NEON (BlueField-3 / aarch64 only):
- *     gcc -O3 -march=armv8-a+simd -DUSE_NEON -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_neon -lm
+ *     gcc -O3 -march=armv8-a+simd -DUSE_NEON -DMODEL_HEADER='"model_64_32.h"' mlp_bench.c -o bench_neon -lm
  *
  *   AVX2 (x86 host only):
  *     gcc -O3 -mavx2 -mfma -DUSE_AVX -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_avx -lm
  *
  *   XNNPACK (either platform, needs XNNPACK built/installed):
- *     gcc -O3 -DUSE_XNNPACK -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_xnn \
- *         -I/path/to/XNNPACK/include -L/path/to/XNNPACK/build -lXNNPACK -lpthreadpool -lm -lpthread
+ *     gcc -O3 -DUSE_XNNPACK -DMODEL_HEADER='"model_64_32.h"' mlp_bench.c -o bench_xnnpack -lXNNPACK -lpthreadpool -lcpuinfo -lm -lpthread
  *
  * Output: latencies.csv  (columns: iter,latency_ns)
  * Rename the CSV after each run, e.g. latencies_64_32_neon.csv, before the
@@ -168,10 +167,11 @@ static int predict_mlp_avx(const float *in_features, float *buf_a, float *buf_b)
 static xnn_subgraph_t g_subgraph = NULL;
 static xnn_runtime_t  g_runtime  = NULL;
 static uint32_t g_input_id, g_output_id;
+static struct xnn_dynamic_alloc_ctx {int unused;} g_unused;
 static float *g_input_buf, *g_output_buf;
 
 static void build_xnnpack_runtime(void) {
-    enum xnn_status st = xnn_initialize(NULL);
+    xnn_status st = xnn_initialize(NULL);
     if (st != xnn_status_success) { fprintf(stderr, "xnn_initialize failed\n"); exit(1); }
 
     st = xnn_create_subgraph(/*external_value_ids=*/2, /*flags=*/0, &g_subgraph);
@@ -213,7 +213,7 @@ static void build_xnnpack_runtime(void) {
 
     size_t num_threads = 1;
     pthreadpool_t threadpool = pthreadpool_create(num_threads);
-    st = xnn_create_runtime_v2(g_subgraph, threadpool, /*flags=*/0, &g_runtime);
+    st = xnn_create_runtime_v4(g_subgraph, NULL, NULL, threadpool, 0, &g_runtime);
     if (st != xnn_status_success) { fprintf(stderr, "xnn_create_runtime failed\n"); exit(1); }
 
     posix_memalign((void**)&g_input_buf, 16, LAYER_SIZES[0] * sizeof(float));

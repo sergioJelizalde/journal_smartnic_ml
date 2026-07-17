@@ -177,7 +177,7 @@ static void build_xnnpack_runtime(void) {
         cur_id = next_id;
     }
     pthreadpool_t tp = pthreadpool_create(1);
-    xnn_create_runtime_v2(g_subgraph, tp, 0, &g_runtime);
+    xnn_create_runtime_v4(g_subgraph, NULL, NULL, tp, 0, &g_runtime);
     posix_memalign((void**)&g_input_buf, 16, LAYER_SIZES[0] * sizeof(float));
     posix_memalign((void**)&g_output_buf, 16, LAYER_SIZES[NUM_LAYERS] * sizeof(float));
 }
