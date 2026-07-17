@@ -4,22 +4,22 @@
  * Build (pick exactly one kernel define) and one model header:
  *
  *   Scalar (x86 or ARM):
- *     gcc -O3 -DUSE_SCALAR -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_scalar -lm
+ *     gcc -O3 -DUSE_SCALAR -DMODEL_HEADER='"mlp_flow_model.h"' mlp_bench.c -o bench_scalar -lm
  *
  *   NEON (BlueField-3 / aarch64 only):
- *     gcc -O3 -march=armv8-a+simd -DUSE_NEON -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_neon -lm
+ *     gcc -O3 -march=armv8-a+simd -DUSE_NEON -DMODEL_HEADER='"mlp_flow_model.h"' mlp_bench.c -o bench_neon -lm
  *
  *   AVX2 (x86 host only):
- *     gcc -O3 -mavx2 -mfma -DUSE_AVX -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_avx -lm
+ *     gcc -O3 -mavx2 -mfma -DUSE_AVX -DMODEL_HEADER='"mlp_flow_model.h"' mlp_bench.c -o bench_avx -lm
  *
  *   XNNPACK (either platform, needs XNNPACK built/installed):
- *     gcc -O3 -DUSE_XNNPACK -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_xnn -lXNNPACK -lpthreadpool -lm -lpthread
+ *     gcc -O3 -DUSE_XNNPACK -DMODEL_HEADER='"mlp_flow_model.h"' mlp_bench.c -o bench_xnn -lXNNPACK -lpthreadpool -lm -lpthread
  *
  *   GENERATED (shape-specialized NEON, aarch64 only). First run the code
  *   generator with the SAME layer sizes as the model header:
  *     python3 gen_neon_mlp.py 64 32 16 2 -o mlp_generated.h
  *     gcc -O3 -march=armv8-a+simd -DUSE_GENERATED \
- *         -DMODEL_HEADER='"mlp_64_32.h"' mlp_bench.c -o bench_gen -lm
+ *         -DMODEL_HEADER='"mlp_flow_model.h"' mlp_bench.c -o bench_gen -lm
  *
  *   HARDCODED (weight-hardcoded NEON, aarch64 only). From train_export_hardcoded.py:
  *     python3 train_export_hardcoded.py --csv flows.csv --hidden 64 32 --backend torch
@@ -243,16 +243,17 @@ static void build_xnnpack_runtime(void) {
 
     posix_memalign((void**)&g_input_buf, 16, LAYER_SIZES[0] * sizeof(float));
     posix_memalign((void**)&g_output_buf, 16, LAYER_SIZES[NUM_LAYERS] * sizeof(float));
+
+    struct xnn_external_value ext[2] = {
+        {0, g_input_buf},
+        {1, g_output_buf},
+    };
     xnn_setup_runtime(g_runtime, 2, ext);
 }
 
 static int predict_mlp_xnnpack(const float *in_features) {
     memcpy(g_input_buf, in_features, LAYER_SIZES[0] * sizeof(float));
-    struct xnn_external_value ext[2] = {
-        {0, g_input_buf},
-        {1, g_output_buf},
-    };
-    
+
     xnn_invoke_runtime(g_runtime);
 
     int final_size = LAYER_SIZES[NUM_LAYERS], best = 0;
