@@ -16,4 +16,4 @@ build/
 
 # Generated model files (large binaries)
 *.pt
-*.pth
+*.pthoffline_bench_inference/bf3/src/lat_xnn_64_32.csv
