@@ -632,7 +632,7 @@ static int clean_up_worker(struct app_context *app_ctx, struct worker_ctx *wk)
 int main(int argc, char **argv)
 {
 	struct flexio_app_select_attr flexio_app_sel_attr = {0};
-	struct flexio_msg_stream_attr_t stream_fattr = {0};
+	flexio_msg_stream_attr_t stream_fattr = {0};
 	struct flexio_process *app_fp = NULL;
 	struct app_context app_ctx = {0};
 	struct ibv_port_attr port_attr;
