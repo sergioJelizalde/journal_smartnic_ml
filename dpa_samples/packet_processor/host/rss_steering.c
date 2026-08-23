@@ -37,7 +37,7 @@
 
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
-
+#include "rss_steering.h"
 /* ------------------------------------------------------------------ */
 /* Minimal PRM definitions (subset of mlx5_ifc.h needed here).         */
 /* ------------------------------------------------------------------ */
@@ -93,8 +93,6 @@ static void print_syndrome(const char *what, const void *out)
 	fprintf(stderr, "%s failed: status=0x%x syndrome=0x%x\n",
 		what, buf_get32(out, 0) >> 24, buf_get32(out, 4));
 }
-
-void rss_steering_destroy(struct rss_steering_ctx *rss);
 
 /* ------------------------------------------------------------------ */
 /* Context handed back to the application.                             */
