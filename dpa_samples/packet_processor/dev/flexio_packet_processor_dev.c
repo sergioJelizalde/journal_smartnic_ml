@@ -137,18 +137,20 @@ static void process_packet(void)
 	/* Take the next entry from the data ring */
 	sq_data = get_next_dte(&app_ctx.dt_ctx, DATA_IDX_MASK, LOG_WQD_CHUNK_BSIZE);
 
-	/* Copy received packet to sq_data as is */
-	memcpy(sq_data, rq_data, data_sz);
+	uint64_t cycles_start = __dpa_thread_cycles();
 
-	/* swap mac address */
+	/* Copy and process packet */
+	memcpy(sq_data, rq_data, data_sz);
 	swap_macs(sq_data);
 
-	/* Primitive validation, that packet is our hardcoded */
-	if (data_sz == 65) {
-		/* modify UDP payload */
-		memcpy(sq_data + 0x2a, "  Event demo***************", 65 - 0x2a);
+	uint64_t cycles_end = __dpa_thread_cycles();
+	uint64_t cycles_elapsed = cycles_end - cycles_start;
+	uint64_t us_elapsed = cycles_elapsed / 1800;  /* 1.8 GHz */
 
-		/* Set hexadecimal value by the index */
+	flexio_dev_print("DPA latency: %lu cycles (%lu us)\n", cycles_elapsed, us_elapsed);
+
+	if (data_sz == 65) {
+		memcpy(sq_data + 0x2a, "  Event demo***************", 65 - 0x2a);
 		sq_data[0x2a] = "0123456789abcdef"[app_ctx.dt_ctx.tx_buff_idx & 0xf];
 	}
 
