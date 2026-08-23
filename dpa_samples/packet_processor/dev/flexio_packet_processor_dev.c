@@ -138,18 +138,18 @@ static void process_packet(void)
 	/* Take the next entry from the data ring */
 	sq_data = get_next_dte(&app_ctx.dt_ctx, DATA_IDX_MASK, LOG_WQD_CHUNK_BSIZE);
 
-	uint64_t cycles_start = __dpa_thread_cycles();
+	//uint64_t cycles_start = __dpa_thread_cycles();
 
 	/* Copy and process packet */
 	memcpy(sq_data, rq_data, data_sz);
 	swap_macs(sq_data);
 
-	uint64_t cycles_end = __dpa_thread_cycles();
-	uint64_t cycles_elapsed = cycles_end - cycles_start;
-	uint32_t ns_elapsed = (cycles_elapsed * 1000) / 1800;  /* nanoseconds */
+	//uint64_t cycles_end = __dpa_thread_cycles();
+	//uint64_t cycles_elapsed = cycles_end - cycles_start;
+	//uint32_t ns_elapsed = (cycles_elapsed * 1000) / 1800;  /* nanoseconds */
 
-	flexio_dev_print("DPA_LATENCY: %lu cycles (%u ns) size=%u\n", 
-                     cycles_elapsed, ns_elapsed, data_sz);
+	//flexio_dev_print("DPA_LATENCY: %lu cycles (%u ns) size=%u\n", 
+        //             cycles_elapsed, ns_elapsed, data_sz);
 
 	if (data_sz == 65) {
 		memcpy(sq_data + 0x2a, "  Event demo***************", 65 - 0x2a);
