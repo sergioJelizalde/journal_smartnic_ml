@@ -135,39 +135,83 @@ static int alloc_td(struct ibv_context *ctx, struct rss_steering_ctx *rss)
 	return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* devx: CREATE_RQT over the FlexIO worker RQ numbers.                 */
-/* rqtc at in+0x20; rqt_max|actual at rqtc+0x14; rq list at rqtc+0xEC. */
-/* ------------------------------------------------------------------ */
-static int create_rqt(struct ibv_context *ctx, struct rss_steering_ctx *rss,
-		      const uint32_t *rqn, int num_rqs)
+static inline void
+buf_set16(void *buf, size_t byte_off, uint16_t host_val)
 {
-	const size_t rqtc_off = 0x20;
-	const size_t list_off = rqtc_off + 0xEC;
-	size_t in_bsize = list_off + 4 * (size_t)num_rqs;
-	uint8_t out[16] = {0};
-	uint8_t *in;
-	int i;
+    uint16_t be = htons(host_val);
 
-	in = calloc(1, in_bsize);
-	if (!in)
-		return -1;
+    memcpy((uint8_t *)buf + byte_off, &be, sizeof(be));
+}
 
-	buf_set32(in, 0x00, MLX5_CMD_OP_CREATE_RQT << 16);
-	/* rqt_max_size[31:16] | rqt_actual_size[15:0] */
-	buf_set32(in, rqtc_off + 0x14,
-		  ((uint32_t)num_rqs << 16) | (uint32_t)num_rqs);
-	for (i = 0; i < num_rqs; i++)
-		buf_set32(in, list_off + 4 * (size_t)i, rqn[i] & 0xffffff);
+static unsigned int
+next_power_of_two(unsigned int n)
+{
+    unsigned int p = 1;
 
-	rss->rqt_obj = mlx5dv_devx_obj_create(ctx, in, in_bsize, out, sizeof(out));
-	free(in);
-	if (!rss->rqt_obj) {
-		print_syndrome("CREATE_RQT", out);
-		return -1;
-	}
-	rss->rqtn = buf_get32(out, 0x08) & 0xffffff;
-	return 0;
+    while (p < n)
+        p <<= 1;
+    return p;
+}
+
+static int
+create_rqt(struct ibv_context *ctx, struct rss_steering_ctx *rss,
+           const uint32_t *rqn, int num_rqs)
+{
+    const size_t rqtc_off = 0x20;        /* create_rqt_in.rqt_context */
+    const size_t max_size_off = 0x16;    /* rqtc.rqt_max_size */
+    const size_t actual_size_off = 0x1a; /* rqtc.rqt_actual_size */
+    const size_t list_off = 0xf0;        /* rqtc.rq_num[0] */
+
+    unsigned int rqt_size;
+    size_t in_bsize;
+    uint8_t out[16] = {0};
+    uint8_t *in;
+    int i;
+
+    if (num_rqs < 1) {
+        fprintf(stderr, "RQT requires at least one RQ\n");
+        return -1;
+    }
+
+    /*
+     * Hardware requires rqt_max_size and rqt_actual_size to be powers
+     * of two. If workers is 3, use four slots: 0,1,2,0.
+     */
+    rqt_size = next_power_of_two((unsigned int)num_rqs);
+
+    in_bsize = rqtc_off + list_off + 4 * (size_t)rqt_size;
+    in = calloc(1, in_bsize);
+    if (!in)
+        return -1;
+
+    buf_set32(in, 0x00, MLX5_CMD_OP_CREATE_RQT << 16);
+
+    /* Both are 16-bit, big-endian fields—not one combined dword. */
+    buf_set16(in, rqtc_off + max_size_off, rqt_size);
+    buf_set16(in, rqtc_off + actual_size_off, rqt_size);
+
+    /*
+     * Each 32-bit rq_num entry has reserved high 8 bits and a 24-bit RQN.
+     * Repeat queue targets only when workers is not a power of two.
+     */
+    for (i = 0; i < (int)rqt_size; i++)
+        buf_set32(in, rqtc_off + list_off + 4 * (size_t)i,
+                  rqn[i % num_rqs] & 0x00ffffff);
+
+    rss->rqt_obj = mlx5dv_devx_obj_create(ctx, in, in_bsize,
+                                           out, sizeof(out));
+    free(in);
+
+    if (!rss->rqt_obj) {
+        print_syndrome("CREATE_RQT", out);
+        return -1;
+    }
+
+    rss->rqtn = buf_get32(out, 0x08) & 0x00ffffff;
+
+    printf("RSS: RQT created: %u entries over %d worker RQs\n",
+           rqt_size, num_rqs);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
