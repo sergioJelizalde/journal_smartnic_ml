@@ -803,7 +803,13 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Failed in fread\n");
 
 cleanup:
-	/* RSS chain first: DR rules / TIRs / RQT hold references to the RQs. */
+	/* RX rule references the RSS TIR -> destroy it first. */
+	if (app_ctx.rx_rule && destroy_rule(app_ctx.rx_rule))
+		err = -1;
+	if (app_ctx.rx_matcher && destroy_matcher(app_ctx.rx_matcher))
+		err = -1;
+
+	/* RSS chain next: TIRs / RQT hold references to the RQs. */
 	if (app_ctx.rss)
 		rss_steering_destroy(app_ctx.rss);
 
