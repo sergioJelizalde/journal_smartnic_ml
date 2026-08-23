@@ -119,6 +119,7 @@ struct worker_ctx {
 };
 
 /* Global application context. */
+/* Global application context. */
 struct app_context {
 	struct flexio_process *flexio_process;
 	struct flexio_app *flexio_app;
@@ -128,14 +129,19 @@ struct app_context {
 	struct ibv_pd *process_pd;
 	struct ibv_context *ibv_ctx;
 
-	/* 5-tuple RSS chain (TD + RQT + TIRs + DR rules). */
+	/* 5-tuple RSS chain (TD + RQT + TIRs). */
 	struct rss_steering_ctx *rss;
+
+	/* RX rule via flow_steering_utils -> RSS TIR. */   /* <-- ADD */
+	struct flow_matcher *rx_matcher;                    /* <-- ADD */
+	struct flow_rule *rx_rule;                          /* <-- ADD */
+
 	struct flow_matcher *tx_matcher;
 	struct flow_rule *tx_rule_table;
 	struct flow_rule *tx_rule_vport;
 
 	int num_workers;
-	int eu_base;	/* First EU ID for STRICT pinning (worker i -> EU eu_base+i). */
+	int eu_base;
 	struct worker_ctx wk[MAX_WORKERS];
 };
 
