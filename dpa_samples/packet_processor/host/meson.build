@@ -32,7 +32,7 @@
 
 # Build sample as executable application
 executable('flexio_packet_processor',
-	['host/flexio_packet_processor_parallel_rss.c',
+	['host/flexio_packet_processor_host.c',
 	'host/rss_steering.c'],
 	c_args: '-DDEV_APP_NAME='+dev_app_name,
 	native: true,
