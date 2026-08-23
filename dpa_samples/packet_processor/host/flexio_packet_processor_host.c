@@ -43,6 +43,7 @@
 #include <libflexio/flexio.h>
 
 #include "flow_steering_utils.h"
+#include "rss_steering.h"
 #include "../flexio_packet_processor_com.h"
 
 /* Device-side function stub (unchanged device binary). */
@@ -104,9 +105,6 @@ struct worker_ctx {
 	struct flexio_rq *rq;
 	struct flexio_mkey *rqd_mkey;
 
-	/* RX steering rule for this worker's MAC. */
-	struct flow_rule *rx_rule;
-
 	/* Transfer structs copied to DPA heap for this worker. */
 	struct app_transfer_cq sq_cq_transf;
 	struct app_transfer_wq sq_transf;
@@ -130,8 +128,8 @@ struct app_context {
 	struct ibv_pd *process_pd;
 	struct ibv_context *ibv_ctx;
 
-	/* Shared matchers (rules are per worker). */
-	struct flow_matcher *rx_matcher;
+	/* 5-tuple RSS chain (TD + RQT + TIRs + DR rules). */
+	struct rss_steering_ctx *rss;
 	struct flow_matcher *tx_matcher;
 	struct flow_rule *tx_rule_table;
 	struct flow_rule *tx_rule_vport;
@@ -166,7 +164,16 @@ static int app_open_ibv_ctx(struct app_context *app_ctx, char *device)
 		goto cleanup;
 	}
 
-	app_ctx->ibv_ctx = ibv_open_device(dev_list[dev_i]);
+	{
+		/* DEVX access is required for the RSS PRM commands
+		 * (ALLOC_TD / CREATE_RQT / CREATE_TIR). FlexIO runs fine
+		 * on a devx-enabled context.
+		 */
+		struct mlx5dv_context_attr dv_attr = {
+			.flags = MLX5DV_CONTEXT_FLAGS_DEVX,
+		};
+		app_ctx->ibv_ctx = mlx5dv_open_device(dev_list[dev_i], &dv_attr);
+	}
 	if (!app_ctx->ibv_ctx) {
 		fprintf(stderr, "Couldn't open an IBV context for device '%s'\n", device);
 		ret = -1;
@@ -472,33 +479,27 @@ static int create_worker_rq(struct app_context *app_ctx, struct worker_ctx *wk)
 }
 
 /* ------------------------------------------------------------------ */
-/* Steering: one RX rule per worker (SMAC_BASE + i -> worker i's TIR). */
-/* TX rules stay shared (single wildcard-ish path to the wire).        */
+/* Steering: single-SMAC 5-tuple RSS across all worker RQs.            */
+/* RX: {SMAC, ip_proto} -> Toeplitz TIR -> RQT -> RQ[0..N-1].          */
+/* TX: original single pair (all traffic carries SMAC_BASE).           */
 /* ------------------------------------------------------------------ */
 static int create_steering_rules(struct app_context *app_ctx, int nic_mode)
 {
+	uint32_t rqns[MAX_WORKERS];
 	int w;
 
-	app_ctx->rx_matcher = create_matcher_rx(app_ctx->ibv_ctx);
-	if (!app_ctx->rx_matcher) {
-		fprintf(stderr, "Failed to create RX matcher\n");
+	/* Collect the FlexIO RQ numbers of all workers for the RQT. */
+	for (w = 0; w < app_ctx->num_workers; w++)
+		rqns[w] = app_ctx->wk[w].rq_transf.wq_num;
+
+	/* One SMAC, hashed by 5-tuple across all worker RQs:
+	 *   RX rule (SMAC_BASE, ip_proto) -> RSS TIR -> RQT -> RQ[0..N-1].
+	 */
+	app_ctx->rss = rss_steering_create(app_ctx->ibv_ctx, rqns,
+					   app_ctx->num_workers, SMAC_BASE);
+	if (!app_ctx->rss) {
+		fprintf(stderr, "Failed to create RSS steering chain\n");
 		return -1;
-	}
-
-	for (w = 0; w < app_ctx->num_workers; w++) {
-		struct worker_ctx *wk = &app_ctx->wk[w];
-		uint64_t smac = SMAC_BASE + w;
-
-		wk->rx_rule = create_rule_rx_mac_match(app_ctx->rx_matcher,
-						       flexio_rq_get_tir(wk->rq),
-						       smac);
-		if (!wk->rx_rule) {
-			fprintf(stderr, "Failed to create RX rule for worker %d\n", w);
-			return -1;
-		}
-		printf("Worker %d: RX rule SMAC %012lx -> RQ#%u (CQ#%u, EU %d)\n",
-		       w, smac, wk->rq_transf.wq_num, wk->rq_cq_transf.cq_num,
-		       app_ctx->eu_base + w);
 	}
 
 	if (!nic_mode) {
@@ -508,26 +509,21 @@ static int create_steering_rules(struct app_context *app_ctx, int nic_mode)
 			return -1;
 		}
 
-		/* TX side: forward packets from any worker SQ out to the wire.
-		 * The sample's TX rules match on SMAC as well; install one pair
-		 * per worker MAC so reflected packets from every worker exit.
+		/* All traffic carries the single base SMAC again, so the
+		 * original one-pair TX path is sufficient.
 		 */
-		for (w = 0; w < app_ctx->num_workers; w++) {
-			uint64_t smac = SMAC_BASE + w;
+		app_ctx->tx_rule_table =
+			create_rule_tx_fwd_to_sws_table(app_ctx->tx_matcher, SMAC_BASE);
+		if (!app_ctx->tx_rule_table) {
+			fprintf(stderr, "Failed to create TX table steering rule\n");
+			return -1;
+		}
 
-			app_ctx->tx_rule_table =
-				create_rule_tx_fwd_to_sws_table(app_ctx->tx_matcher, smac);
-			if (!app_ctx->tx_rule_table) {
-				fprintf(stderr, "Failed TX table rule (worker %d)\n", w);
-				return -1;
-			}
-
-			app_ctx->tx_rule_vport =
-				create_rule_tx_fwd_to_vport(app_ctx->tx_matcher, smac);
-			if (!app_ctx->tx_rule_vport) {
-				fprintf(stderr, "Failed TX vport rule (worker %d)\n", w);
-				return -1;
-			}
+		app_ctx->tx_rule_vport =
+			create_rule_tx_fwd_to_vport(app_ctx->tx_matcher, SMAC_BASE);
+		if (!app_ctx->tx_rule_vport) {
+			fprintf(stderr, "Failed to create TX vport steering rule\n");
+			return -1;
 		}
 	}
 
@@ -576,9 +572,6 @@ static int clean_up_worker(struct app_context *app_ctx, struct worker_ctx *wk)
 	int err = 0;
 
 	if (wk->app_data_daddr && flexio_buf_dev_free(fp, wk->app_data_daddr))
-		err = -1;
-
-	if (wk->rx_rule && destroy_rule(wk->rx_rule))
 		err = -1;
 
 	/* SQ side. */
@@ -791,6 +784,10 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Failed in fread\n");
 
 cleanup:
+	/* RSS chain first: DR rules / TIRs / RQT hold references to the RQs. */
+	if (app_ctx.rss)
+		rss_steering_destroy(app_ctx.rss);
+
 	/* Per-worker resources (reverse creation order inside). */
 	for (w = app_ctx.num_workers - 1; w >= 0; w--) {
 		if (clean_up_worker(&app_ctx, &app_ctx.wk[w]))
@@ -803,8 +800,6 @@ cleanup:
 	if (app_ctx.tx_rule_table && destroy_rule(app_ctx.tx_rule_table))
 		err = -1;
 	if (app_ctx.tx_matcher && destroy_matcher(app_ctx.tx_matcher))
-		err = -1;
-	if (app_ctx.rx_matcher && destroy_matcher(app_ctx.rx_matcher))
 		err = -1;
 
 	if (app_fp && app_ctx.stream && flexio_msg_stream_destroy(app_ctx.stream))
