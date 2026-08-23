@@ -38,6 +38,7 @@
  * The include must be placed first to correctly handle the version.
  */
 #include "com_dev.h"
+#include <libflexio-dev/flexio_dev_debug.h>
 #include <libflexio-dev/flexio_dev_err.h>
 #include <libflexio-dev/flexio_dev_queue_access.h>
 #include <libflexio-libc/string.h>
