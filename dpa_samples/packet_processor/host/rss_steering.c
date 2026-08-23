@@ -38,6 +38,8 @@
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
 #include "rss_steering.h"
+#include <stddef.h>
+#include <netinet/in.h>
 /* ------------------------------------------------------------------ */
 /* Minimal PRM definitions (subset of mlx5_ifc.h needed here).         */
 /* ------------------------------------------------------------------ */
@@ -267,8 +269,8 @@ static struct mlx5dv_devx_obj *create_rss_tir(struct ibv_context *ctx,
 /* DR: matcher on {SMAC, ip_protocol}; two rules -> two TIRs.          */
 /* ------------------------------------------------------------------ */
 struct match_buf {
-	uint32_t match_sz;
-	uint8_t buf[FTE_MATCH_PARAM_BSIZE];
+    size_t match_sz; /* Must be size_t, not uint32_t */
+    uint8_t buf[FTE_MATCH_PARAM_BSIZE];
 };
 
 static void match_set_smac(uint8_t *p, uint64_t smac)
@@ -282,69 +284,86 @@ static void match_set_ipproto(uint8_t *p, uint8_t proto)
 	buf_set32(p, OUT_IPPROTO_DW, (uint32_t)proto << 24);
 }
 
-static int create_dr_rules(struct ibv_context *ctx, struct rss_steering_ctx *rss,
-			   uint64_t smac)
+static int create_dr_rules(struct ibv_context *ctx,
+                           struct rss_steering_ctx *rss,
+                           uint64_t smac)
 {
-	struct match_buf mask = { .match_sz = FTE_MATCH_PARAM_BSIZE };
-	struct match_buf val = { .match_sz = FTE_MATCH_PARAM_BSIZE };
-	struct mlx5dv_dr_action *actions[1];
+    struct match_buf mask = { .match_sz = FTE_MATCH_PARAM_BSIZE };
+    struct match_buf val  = { .match_sz = FTE_MATCH_PARAM_BSIZE };
+    struct mlx5dv_dr_action *actions[1];
 
-	rss->dr_domain = mlx5dv_dr_domain_create(ctx, MLX5DV_DR_DOMAIN_TYPE_NIC_RX);
-	if (!rss->dr_domain) {
-		fprintf(stderr, "dr_domain_create failed (%d)\n", errno);
-		return -1;
-	}
+    rss->dr_domain = mlx5dv_dr_domain_create(
+        ctx, MLX5DV_DR_DOMAIN_TYPE_NIC_RX);
+    if (!rss->dr_domain) {
+        fprintf(stderr, "dr_domain_create failed (%d)\n", errno);
+        return -1;
+    }
 
-	rss->dr_table = mlx5dv_dr_table_create(rss->dr_domain, 0);
-	if (!rss->dr_table) {
-		fprintf(stderr, "dr_table_create failed (%d)\n", errno);
-		return -1;
-	}
+    rss->dr_table = mlx5dv_dr_table_create(rss->dr_domain, 0);
+    if (!rss->dr_table) {
+        fprintf(stderr, "dr_table_create failed (%d)\n", errno);
+        return -1;
+    }
 
-	/* Mask: full SMAC + full ip_protocol. criteria_enable bit0 = outer. */
-	memset(mask.buf, 0, sizeof(mask.buf));
-	match_set_smac(mask.buf, 0xffffffffffffULL);
-	match_set_ipproto(mask.buf, 0xff);
+    memset(mask.buf, 0, sizeof(mask.buf));
+    match_set_smac(mask.buf, 0xffffffffffffULL);
+    match_set_ipproto(mask.buf, 0xff);
 
-	rss->dr_matcher = mlx5dv_dr_matcher_create(rss->dr_table, 0, 1 /* outer */,
-			(struct mlx5dv_flow_match_parameters *)&mask);
-	if (!rss->dr_matcher) {
-		fprintf(stderr, "dr_matcher_create failed (%d)\n", errno);
-		return -1;
-	}
+    rss->dr_matcher = mlx5dv_dr_matcher_create(
+        rss->dr_table,
+        0,
+        1, /* outer-header criterion */
+        (struct mlx5dv_flow_match_parameters *)&mask);
+    if (!rss->dr_matcher) {
+        fprintf(stderr, "dr_matcher_create failed (%d)\n", errno);
+        return -1;
+    }
 
-	rss->act_tir_tcp = mlx5dv_dr_action_create_dest_devx_tir(rss->tir_tcp_obj);
-	rss->act_tir_udp = mlx5dv_dr_action_create_dest_devx_tir(rss->tir_udp_obj);
-	if (!rss->act_tir_tcp || !rss->act_tir_udp) {
-		fprintf(stderr, "dr_action_create_dest_devx_tir failed (%d)\n", errno);
-		return -1;
-	}
+    rss->act_tir_tcp =
+        mlx5dv_dr_action_create_dest_devx_tir(rss->tir_tcp_obj);
+    rss->act_tir_udp =
+        mlx5dv_dr_action_create_dest_devx_tir(rss->tir_udp_obj);
+    if (!rss->act_tir_tcp || !rss->act_tir_udp) {
+        fprintf(stderr, "dr_action_create_dest_devx_tir failed (%d)\n",
+                errno);
+        return -1;
+    }
 
-	/* Rule 1: SMAC + TCP(6) -> TCP TIR */
-	memset(val.buf, 0, sizeof(val.buf));
-	match_set_smac(val.buf, smac);
-	match_set_ipproto(val.buf, 6);
-	actions[0] = rss->act_tir_tcp;
-	rss->rule_tcp = mlx5dv_dr_rule_create(rss->dr_matcher,
-			(struct mlx5dv_flow_match_parameters *)&val, 1, actions);
-	if (!rss->rule_tcp) {
-		fprintf(stderr, "dr_rule_create(TCP) failed (%d)\n", errno);
-		return -1;
-	}
+    memset(val.buf, 0, sizeof(val.buf));
+    match_set_smac(val.buf, smac);
+    match_set_ipproto(val.buf, IPPROTO_TCP);
 
-	/* Rule 2: SMAC + UDP(17) -> UDP TIR */
-	memset(val.buf, 0, sizeof(val.buf));
-	match_set_smac(val.buf, smac);
-	match_set_ipproto(val.buf, 17);
-	actions[0] = rss->act_tir_udp;
-	rss->rule_udp = mlx5dv_dr_rule_create(rss->dr_matcher,
-			(struct mlx5dv_flow_match_parameters *)&val, 1, actions);
-	if (!rss->rule_udp) {
-		fprintf(stderr, "dr_rule_create(UDP) failed (%d)\n", errno);
-		return -1;
-	}
+    actions[0] = rss->act_tir_tcp;
+    rss->rule_tcp = mlx5dv_dr_rule_create(
+        rss->dr_matcher,
+        (struct mlx5dv_flow_match_parameters *)&val,
+        1, actions);
+    if (!rss->rule_tcp) {
+        fprintf(stderr, "dr_rule_create(TCP) failed (%d)\n", errno);
+        return -1;
+    }
 
-	return 0;
+    memset(val.buf, 0, sizeof(val.buf));
+    match_set_smac(val.buf, smac);
+    match_set_ipproto(val.buf, IPPROTO_UDP);
+
+    actions[0] = rss->act_tir_udp;
+    rss->rule_udp = mlx5dv_dr_rule_create(
+        rss->dr_matcher,
+        (struct mlx5dv_flow_match_parameters *)&val,
+        1, actions);
+    if (!rss->rule_udp) {
+        fprintf(stderr, "dr_rule_create(UDP) failed (%d)\n", errno);
+        return -1;
+    }
+
+    if (mlx5dv_dr_domain_sync(rss->dr_domain,
+                              MLX5DV_DR_DOMAIN_SYNC_FLAGS_SW)) {
+        fprintf(stderr, "dr_domain_sync failed (%d)\n", errno);
+        return -1;
+    }
+
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
