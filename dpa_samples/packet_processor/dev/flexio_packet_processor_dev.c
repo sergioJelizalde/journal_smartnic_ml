@@ -138,15 +138,15 @@ static void process_packet(void)
 	/* Take the next entry from the data ring */
 	sq_data = get_next_dte(&app_ctx.dt_ctx, DATA_IDX_MASK, LOG_WQD_CHUNK_BSIZE);
 
-	uint64_t cycles_start = __dpa_thread_cycles();
+	//uint64_t cycles_start = __dpa_thread_cycles();
 
 	/* Copy and process packet */
 	memcpy(sq_data, rq_data, data_sz);
 	swap_macs(sq_data);
 
-	uint64_t cycles_end = __dpa_thread_cycles();
-	uint64_t cycles_elapsed = cycles_end - cycles_start;
-	uint32_t ns_elapsed = (cycles_elapsed * 1000) / 1800;  /* nanoseconds */
+	//uint64_t cycles_end = __dpa_thread_cycles();
+	//uint64_t cycles_elapsed = cycles_end - cycles_start;
+	//uint32_t ns_elapsed = (cycles_elapsed * 1000) / 1800;  /* nanoseconds */
 
 	//flexio_dev_print("DPA_LATENCY: %lu cycles (%u ns) size=%u\n", 
     //                 cycles_elapsed, ns_elapsed, data_sz);
@@ -203,7 +203,7 @@ __dpa_global__ void flexio_pp_dev(uint64_t thread_arg)
 	while (flexio_dev_cqe_get_owner(app_ctx.rq_cq_ctx.cqe) !=
 	       app_ctx.rq_cq_ctx.cq_hw_owner_bit) {
 		/* Print the message */
-		flexio_dev_print("Process packet: %ld\n", app_ctx.packets_count++);
+		//flexio_dev_print("Process packet: %ld\n", app_ctx.packets_count++);
 		/* Update memory to DPA */
 		__dpa_thread_fence(__DPA_MEMORY, __DPA_R, __DPA_R);
 		/* Process the packet */
