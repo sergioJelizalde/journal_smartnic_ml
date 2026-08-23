@@ -148,7 +148,8 @@ static void process_packet(void)
 	uint64_t cycles_elapsed = cycles_end - cycles_start;
 	uint64_t us_elapsed = cycles_elapsed / 1800;  /* 1.8 GHz */
 
-	flexio_dev_print("DPA latency: %lu cycles (%lu us)\n", cycles_elapsed, us_elapsed);
+	flexio_dev_print("DPA_LATENCY: %lu cycles (%lu us) size=%u\n", 
+                     cycles_elapsed, us_elapsed, data_sz);
 
 	if (data_sz == 65) {
 		memcpy(sq_data + 0x2a, "  Event demo***************", 65 - 0x2a);
