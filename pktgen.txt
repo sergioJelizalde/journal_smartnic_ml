@@ -1,0 +1,39 @@
+
+range 0 src mac start 02:08:a4:d8:ff:43
+range 0 src mac min 02:08:a4:d8:ff:43
+range 0 src mac max 02:08:a4:d8:ff:43
+range 0 dst mac start cc:40:f3:8f:03:1a
+range 0 dst mac min cc:40:f3:8f:03:1a
+range 0 dst mac max cc:40:f3:8f:03:1a
+
+
+range 0 src ip start 192.168.0.2
+range 0 src ip min 192.168.0.2
+range 0 src ip max 192.168.0.100
+range 0 src ip inc 0.0.0.1
+
+range 0 dst ip start 192.168.0.3
+range 0 dst ip min 192.168.0.3
+range 0 dst ip max 192.168.0.3
+
+
+range 0 size start 1500
+range 0 size min 1500
+range 0 size max 1500
+
+
+range 0 dst port start 1234
+range 0 dst port min 1234
+range 0 dst port max 1234
+range 0 src port start 5678
+range 0 src port min 5678
+range 0 src port max 5678
+
+
+range 0 proto tcp
+
+
+enable 0 range
+
+range 0 proto tcp
+page main

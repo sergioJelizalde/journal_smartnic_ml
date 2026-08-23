@@ -502,6 +502,25 @@ static int create_steering_rules(struct app_context *app_ctx, int nic_mode)
 		return -1;
 	}
 
+	/* add to struct app_context: */
+	struct flow_matcher *rx_matcher;
+	struct flow_rule *rx_rule;
+
+	/* in create_steering_rules(), after rss_steering_create(): */
+	app_ctx->rx_matcher = create_matcher_rx(app_ctx->ibv_ctx);
+	if (!app_ctx->rx_matcher) {
+		fprintf(stderr, "Failed to create RX matcher\n");
+		return -1;
+	}
+
+	app_ctx->rx_rule = create_rule_rx_mac_match(app_ctx->rx_matcher,
+			rss_steering_get_tir(app_ctx->rss, 1 /* UDP hash */),
+			SMAC_BASE);
+	if (!app_ctx->rx_rule) {
+		fprintf(stderr, "Failed to create RX->RSS-TIR rule\n");
+		return -1;
+	}
+
 	if (!nic_mode) {
 		app_ctx->tx_matcher = create_matcher_tx(app_ctx->ibv_ctx);
 		if (!app_ctx->tx_matcher) {

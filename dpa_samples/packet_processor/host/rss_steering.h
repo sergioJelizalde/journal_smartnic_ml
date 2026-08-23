@@ -30,4 +30,6 @@ struct rss_steering_ctx *rss_steering_create(struct ibv_context *ibv_ctx,
 /* Destroys rules, TIRs, RQT, TD. Call BEFORE destroying the worker RQs. */
 void rss_steering_destroy(struct rss_steering_ctx *rss);
 
+struct mlx5dv_devx_obj *rss_steering_get_tir(struct rss_steering_ctx *rss, int udp);
+
 #endif /* RSS_STEERING_H_ */

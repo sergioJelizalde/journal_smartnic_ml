@@ -118,6 +118,17 @@ struct rss_steering_ctx {
 	struct mlx5dv_dr_rule *rule_udp;
 };
 
+/* Expose the TIR devx object so the host can steer to it with the
+ * sample's own flow_steering_utils rule (proven RX path on DPU).
+ * udp=1 -> UDP-hash TIR, udp=0 -> TCP-hash TIR.
+ */
+struct mlx5dv_devx_obj *rss_steering_get_tir(struct rss_steering_ctx *rss,
+					     int udp)
+{
+	return udp ? rss->tir_udp_obj : rss->tir_tcp_obj;
+}
+
+
 /* ------------------------------------------------------------------ */
 /* devx: ALLOC_TRANSPORT_DOMAIN                                        */
 /* ------------------------------------------------------------------ */
