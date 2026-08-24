@@ -10,7 +10,13 @@
 #define FLEXIO_PACKET_PROCESSOR_COM_H
 
 #include <stdint.h>
+
+/* Device-side includes differ from host */
+#ifdef __DPA__
+#include <libflexio-libc/string.h>
+#else
 #include <string.h>
+#endif
 
 /* ================================================================== */
 /* QUEUE CONTEXT STRUCTURES (from/to DPA)                            */
