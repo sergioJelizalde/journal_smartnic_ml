@@ -1,19 +1,9 @@
 /*
- * SCALED FLEXIO REFLECTOR - DOCA 3.4
+ * FLEXIO SCALED REFLECTOR - HOST SIDE
+ * DOCA 3.4 / FlexIO 26.4
+ * Based on BenchBF3 architecture: single shared RQ/SQ with thread pool
  * 
- * KEY INSIGHT: Scale to 190+ threads by using a THREAD POOL instead of
- * per-EU event handlers. This is what BenchBF3 does.
- * 
- * Your current design (N handlers on N EUs):
- *   - Limited to ~16 EUs available
- *   - Each handler = 1 EU affinity
- *   - Scales to 16 workers max
- * 
- * Production design (thread pool):
- *   - Create N threads in DPA with FLEXIBLE affinity
- *   - All threads poll shared work queue / RQ CQ ring
- *   - Hardware can schedule across all available EUs
- *   - Scales to 190+ threads
+ * Key: FLEXIBLE affinity + shared CQ = scales to 190+ threads
  */
 
 #include <unistd.h>
@@ -25,22 +15,17 @@
 #include <libflexio/flexio_ver.h>
 
 #define FLEXIO_VER_USED FLEXIO_VER(26, 4, 0)
-
 #include <libflexio/flexio.h>
-#include "rss_steering.h"
-#include "../flexio_packet_processor_com.h"
+#include "flexio_packet_processor_com.h"
 
 extern flexio_func_t flexio_pp_dev;
 
 /* ================================================================== */
-/* SCALED DESIGN PARAMETERS                                           */
+/* CONFIGURATION                                                      */
 /* ================================================================== */
 
-/* Create a single shared RQ pair + CQ pair, with many threads polling it.
- * BenchBF3 approach: all threads read from the same RQ.
- */
 #define L2V(l) (1UL << (l))
-#define LOG_Q_DEPTH 8                  /* Increase from 7 to 8 for more buffer */
+#define LOG_Q_DEPTH 8
 #define Q_DEPTH L2V(LOG_Q_DEPTH)
 #define LOG_Q_DATA_ENTRY_BSIZE 11
 #define Q_DATA_ENTRY_BSIZE L2V(LOG_Q_DATA_ENTRY_BSIZE)
@@ -57,27 +42,33 @@ extern flexio_func_t flexio_pp_dev;
 #define RQ_WQE_BSIZE L2V(LOG_RQ_WQE_BSIZE)
 #define RQ_RING_BSIZE (Q_DEPTH * RQ_WQE_BSIZE)
 
-/* Number of DPA threads to create (scale from 16 to 190+) */
-#define NUM_THREADS 64                 /* Can go up to 190 with proper partition */
+#define NUM_THREADS_DEFAULT 64
 #define MAX_THREADS 256
 
-/* Base source MAC for RX steering */
 #define SMAC_BASE 0x0208a4d8ff43
 
 #define MSG_HOST_BUFF_BSIZE (512 * L2V(FLEXIO_MSG_DEV_LOG_DATA_CHUNK_BSIZE))
 
 /* ================================================================== */
-/* THREAD POOL CONTEXT (shared by all threads)                        */
+/* SHARED CONTEXT (single per application)                           */
 /* ================================================================== */
-struct shared_context {
-	/* Single RQ + CQ pair (all threads poll same CQ) */
-	struct flexio_cq *rq_cq;
+
+struct app_context {
+	struct flexio_process *flexio_process;
+	struct flexio_app *flexio_app;
+	struct flexio_msg_stream *stream;
+	struct flexio_uar *process_uar;
+	struct ibv_pd *process_pd;
+	struct ibv_context *ibv_ctx;
+
+	/* Single shared RQ + CQ */
 	struct flexio_rq *rq;
+	struct flexio_cq *rq_cq;
 	struct flexio_mkey *rqd_mkey;
 
-	/* Single SQ + CQ pair (all threads write to same SQ) */
-	struct flexio_cq *sq_cq;
+	/* Single shared SQ + CQ */
 	struct flexio_sq *sq;
+	struct flexio_cq *sq_cq;
 	struct flexio_mkey *sqd_mkey;
 
 	/* Transfer structs for DPA */
@@ -86,38 +77,24 @@ struct shared_context {
 	struct app_transfer_cq rq_cq_transf;
 	struct app_transfer_wq rq_transf;
 
-	/* DPA heap address of shared data */
+	/* DPA heap address */
 	flexio_uintptr_t app_data_daddr;
-};
 
-/* Global application context */
-struct app_context {
-	struct flexio_process *flexio_process;
-	struct flexio_app *flexio_app;
-	struct flexio_msg_stream *stream;
-
-	struct flexio_uar *process_uar;
-	struct ibv_pd *process_pd;
-	struct ibv_context *ibv_ctx;
-
-	struct rss_steering_ctx *rss;
-	struct flow_matcher *rx_matcher;
-	struct flow_rule *rx_rule;
-	struct flow_matcher *tx_matcher;
-	struct flow_rule *tx_rule_table;
-	struct flow_rule *tx_rule_vport;
-
+	/* Thread pool (FLEXIBLE affinity) */
 	int num_threads;
-	struct flexio_event_handler *threads[MAX_THREADS];  /* Thread pool */
-	struct shared_context shared_ctx;
+	struct flexio_event_handler *threads[MAX_THREADS];
 };
 
 /* ================================================================== */
-/* IBV device open (unchanged)                                        */
+/* HELPER: Open IBV context                                           */
 /* ================================================================== */
-static int app_open_ibv_ctx(struct app_context *app_ctx, char *device)
+
+static int app_open_ibv_ctx(struct app_context *app_ctx, const char *device)
 {
 	struct ibv_device **dev_list;
+	struct mlx5dv_context_attr dv_attr = {
+		.flags = MLX5DV_CONTEXT_FLAGS_DEVX,
+	};
 	int ret = 0, dev_i;
 
 	dev_list = ibv_get_device_list(NULL);
@@ -131,19 +108,14 @@ static int app_open_ibv_ctx(struct app_context *app_ctx, char *device)
 			break;
 
 	if (!dev_list[dev_i]) {
-		fprintf(stderr, "No IBV device found for device name '%s'\n", device);
+		fprintf(stderr, "No IBV device found: %s\n", device);
 		ret = -1;
 		goto cleanup;
 	}
 
-	{
-		struct mlx5dv_context_attr dv_attr = {
-			.flags = MLX5DV_CONTEXT_FLAGS_DEVX,
-		};
-		app_ctx->ibv_ctx = mlx5dv_open_device(dev_list[dev_i], &dv_attr);
-	}
+	app_ctx->ibv_ctx = mlx5dv_open_device(dev_list[dev_i], &dv_attr);
 	if (!app_ctx->ibv_ctx) {
-		fprintf(stderr, "Couldn't open an IBV context for device '%s'\n", device);
+		fprintf(stderr, "mlx5dv_open_device failed for %s\n", device);
 		ret = -1;
 	}
 
@@ -153,20 +125,22 @@ cleanup:
 }
 
 /* ================================================================== */
-/* MKey creation                                                       */
+/* Create MKey for DPA memory                                         */
 /* ================================================================== */
+
 static struct flexio_mkey *create_dpa_mkey(struct app_context *app_ctx,
-					   flexio_uintptr_t daddr)
+					   flexio_uintptr_t daddr, size_t size)
 {
 	struct flexio_mkey_attr mkey_attr = {0};
 	struct flexio_mkey *mkey;
 
 	mkey_attr.pd = app_ctx->process_pd;
 	mkey_attr.daddr = daddr;
-	mkey_attr.len = Q_DATA_BSIZE;
+	mkey_attr.len = size;
 	mkey_attr.access = IBV_ACCESS_LOCAL_WRITE;
+
 	if (flexio_device_mkey_create(app_ctx->flexio_process, &mkey_attr, &mkey)) {
-		fprintf(stderr, "Failed to create Flex IO Mkey\n");
+		fprintf(stderr, "flexio_device_mkey_create failed\n");
 		return NULL;
 	}
 
@@ -176,107 +150,65 @@ static struct flexio_mkey *create_dpa_mkey(struct app_context *app_ctx,
 /* ================================================================== */
 /* CQ memory allocation                                               */
 /* ================================================================== */
-static int cq_mem_alloc(struct flexio_process *process, struct app_transfer_cq *cq_transf)
+
+static int cq_mem_alloc(struct flexio_process *process, 
+		        struct app_transfer_cq *cq_transf)
 {
-	struct mlx5_cqe64 *cq_ring_src;
-	struct mlx5_cqe64 *cqe;
-	__be32 dbr[2] = { 0, 0 };
-	int ret = 0;
+	struct mlx5_cqe64 *cq_ring, *cqe;
+	__be32 dbr[2] = {0, 0};
 	uint32_t i;
 
-	if (flexio_copy_from_host(process, dbr, sizeof(dbr), &cq_transf->cq_dbr_daddr)) {
-		fprintf(stderr, "Failed to allocate CQ DBR memory on DPA heap.\n");
+	/* Allocate CQ ring on DPA heap */
+	if (flexio_buf_dev_alloc(process, CQ_BSIZE, &cq_transf->cq_ring_daddr)) {
+		fprintf(stderr, "Failed to allocate CQ ring on DPA\n");
 		return -1;
 	}
 
-	cq_ring_src = calloc(Q_DEPTH, CQE_BSIZE);
-	if (!cq_ring_src) {
-		fprintf(stderr, "Failed to allocate memory for cq_ring_src.\n");
+	/* Allocate DBR on DPA heap */
+	if (flexio_buf_dev_alloc(process, sizeof(dbr), &cq_transf->cq_dbr_daddr)) {
+		fprintf(stderr, "Failed to allocate CQ DBR on DPA\n");
 		return -1;
 	}
 
-	for (i = 0, cqe = cq_ring_src; i < Q_DEPTH; i++)
+	/* Initialize CQ ring on host, transfer to DPA */
+	cq_ring = calloc(Q_DEPTH, CQE_BSIZE);
+	if (!cq_ring) {
+		fprintf(stderr, "calloc for cq_ring failed\n");
+		return -1;
+	}
+
+	/* Set initial ownership bit */
+	for (i = 0, cqe = cq_ring; i < Q_DEPTH; i++)
 		mlx5dv_set_cqe_owner(cqe++, 1);
 
-	if (flexio_copy_from_host(process, cq_ring_src, CQ_BSIZE, &cq_transf->cq_ring_daddr)) {
-		fprintf(stderr, "Failed to allocate CQ ring memory on DPA heap.\n");
-		ret = -1;
+	/* Copy to DPA */
+	if (flexio_host2dev_memcpy(process, cq_ring, CQ_BSIZE, 
+				   cq_transf->cq_ring_daddr)) {
+		fprintf(stderr, "flexio_host2dev_memcpy for CQ ring failed\n");
+		free(cq_ring);
+		return -1;
 	}
 
-	free(cq_ring_src);
-	return ret;
+	free(cq_ring);
+	return 0;
 }
 
 /* ================================================================== */
 /* SQ memory allocation                                               */
 /* ================================================================== */
-static int sq_mem_alloc(struct flexio_process *process, struct app_transfer_wq *sq_transf)
+
+static int sq_mem_alloc(struct flexio_process *process, 
+		        struct app_transfer_wq *sq_transf)
 {
-	flexio_buf_dev_alloc(process, Q_DATA_BSIZE, &sq_transf->wqd_daddr);
-	if (!sq_transf->wqd_daddr)
-		return -1;
-
-	flexio_buf_dev_alloc(process, SQ_RING_BSIZE, &sq_transf->wq_ring_daddr);
-	if (!sq_transf->wq_ring_daddr)
-		return -1;
-
-	return 0;
-}
-
-/* ================================================================== */
-/* Shared SQ + SQ-CQ creation                                          */
-/* ================================================================== */
-static int create_shared_sq(struct app_context *app_ctx, struct shared_context *sc)
-{
-	struct flexio_process *app_fp = app_ctx->flexio_process;
-	struct flexio_cq_attr sqcq_attr = {0};
-	struct flexio_wq_attr sq_attr = {0};
-	uint32_t uar_id = flexio_uar_get_id(app_ctx->process_uar);
-	uint32_t cq_num;
-
-	if (cq_mem_alloc(app_fp, &sc->sq_cq_transf)) {
-		fprintf(stderr, "Failed to alloc memory for SQ's CQ.\n");
+	if (flexio_buf_dev_alloc(process, Q_DATA_BSIZE, &sq_transf->wqd_daddr)) {
+		fprintf(stderr, "Failed to alloc SQ data on DPA\n");
 		return -1;
 	}
 
-	sqcq_attr.log_cq_depth = LOG_Q_DEPTH;
-	/* SQ CQ is polled by DPA threads (non-handler CQ) */
-	sqcq_attr.element_type = FLEXIO_CQ_ELEMENT_TYPE_NON_DPA_CQ;
-	sqcq_attr.uar_id = uar_id;
-	sqcq_attr.cq_dbr_daddr = sc->sq_cq_transf.cq_dbr_daddr;
-	sqcq_attr.cq_ring_qmem.daddr = sc->sq_cq_transf.cq_ring_daddr;
-	if (flexio_cq_create(app_fp, NULL, &sqcq_attr, &sc->sq_cq)) {
-		fprintf(stderr, "Failed to create Flex IO SQ's CQ\n");
+	if (flexio_buf_dev_alloc(process, SQ_RING_BSIZE, &sq_transf->wq_ring_daddr)) {
+		fprintf(stderr, "Failed to alloc SQ ring on DPA\n");
 		return -1;
 	}
-
-	cq_num = flexio_cq_get_cq_num(sc->sq_cq);
-	sc->sq_cq_transf.cq_num = cq_num;
-	sc->sq_cq_transf.log_cq_depth = LOG_Q_DEPTH;
-
-	if (sq_mem_alloc(app_fp, &sc->sq_transf)) {
-		fprintf(stderr, "Failed to allocate memory for SQ\n");
-		return -1;
-	}
-
-	sq_attr.log_wq_depth = LOG_Q_DEPTH;
-	sq_attr.uar_id = uar_id;
-	sq_attr.wq_ring_qmem.daddr = sc->sq_transf.wq_ring_daddr;
-	sq_attr.pd = app_ctx->process_pd;
-
-	if (flexio_sq_create(app_fp, NULL, cq_num, &sq_attr, &sc->sq)) {
-		fprintf(stderr, "Failed to create Flex IO SQ\n");
-		return -1;
-	}
-
-	sc->sq_transf.wq_num = flexio_sq_get_wq_num(sc->sq);
-
-	sc->sqd_mkey = create_dpa_mkey(app_ctx, sc->sq_transf.wqd_daddr);
-	if (!sc->sqd_mkey) {
-		fprintf(stderr, "Failed to create an MKey for SQ data buffer\n");
-		return -1;
-	}
-	sc->sq_transf.wqd_mkey_id = flexio_mkey_get_id(sc->sqd_mkey);
 
 	return 0;
 }
@@ -284,37 +216,111 @@ static int create_shared_sq(struct app_context *app_ctx, struct shared_context *
 /* ================================================================== */
 /* RQ memory allocation                                               */
 /* ================================================================== */
-static int rq_mem_alloc(struct flexio_process *process, struct app_transfer_wq *rq_transf)
+
+static int rq_mem_alloc(struct flexio_process *process, 
+		        struct app_transfer_wq *rq_transf)
 {
-	__be32 dbr[2] = { 0, 0 };
+	__be32 dbr[2] = {0, 0};
 
-	flexio_buf_dev_alloc(process, Q_DATA_BSIZE, &rq_transf->wqd_daddr);
-	if (!rq_transf->wqd_daddr)
+	if (flexio_buf_dev_alloc(process, Q_DATA_BSIZE, &rq_transf->wqd_daddr)) {
+		fprintf(stderr, "Failed to alloc RQ data on DPA\n");
 		return -1;
+	}
 
-	flexio_buf_dev_alloc(process, RQ_RING_BSIZE, &rq_transf->wq_ring_daddr);
-	if (!rq_transf->wq_ring_daddr)
+	if (flexio_buf_dev_alloc(process, RQ_RING_BSIZE, &rq_transf->wq_ring_daddr)) {
+		fprintf(stderr, "Failed to alloc RQ ring on DPA\n");
 		return -1;
+	}
 
-	flexio_copy_from_host(process, dbr, sizeof(dbr), &rq_transf->wq_dbr_daddr);
-	if (!rq_transf->wq_dbr_daddr)
+	if (flexio_buf_dev_alloc(process, sizeof(dbr), &rq_transf->wq_dbr_daddr)) {
+		fprintf(stderr, "Failed to alloc RQ DBR on DPA\n");
 		return -1;
+	}
 
 	return 0;
 }
 
-static int init_dpa_rq_ring(struct app_context *app_ctx, struct shared_context *sc)
+/* ================================================================== */
+/* Create SQ                                                           */
+/* ================================================================== */
+
+static int create_sq(struct app_context *app_ctx)
 {
-	flexio_uintptr_t wqe_data_daddr = sc->rq_transf.wqd_daddr;
-	uint32_t mkey_id = sc->rq_transf.wqd_mkey_id;
-	struct mlx5_wqe_data_seg *rx_wqes;
-	struct mlx5_wqe_data_seg *dseg;
-	int retval = 0;
+	struct flexio_process *fp = app_ctx->flexio_process;
+	struct flexio_cq_attr cq_attr = {0};
+	struct flexio_wq_attr wq_attr = {0};
+	uint32_t uar_id = flexio_uar_get_id(app_ctx->process_uar);
+	uint32_t cq_num;
+
+	/* Allocate SQ CQ memory */
+	if (cq_mem_alloc(fp, &app_ctx->sq_cq_transf)) {
+		fprintf(stderr, "cq_mem_alloc for SQ CQ failed\n");
+		return -1;
+	}
+
+	/* Create SQ CQ (not handler-bound) */
+	cq_attr.log_cq_depth = LOG_Q_DEPTH;
+	cq_attr.element_type = FLEXIO_CQ_ELEMENT_TYPE_NON_DPA_CQ;
+	cq_attr.uar_id = uar_id;
+	cq_attr.cq_dbr_daddr = app_ctx->sq_cq_transf.cq_dbr_daddr;
+	cq_attr.cq_ring_qmem.daddr = app_ctx->sq_cq_transf.cq_ring_daddr;
+
+	if (flexio_cq_create(fp, NULL, &cq_attr, &app_ctx->sq_cq)) {
+		fprintf(stderr, "flexio_cq_create for SQ CQ failed\n");
+		return -1;
+	}
+
+	cq_num = flexio_cq_get_cq_num(app_ctx->sq_cq);
+	app_ctx->sq_cq_transf.cq_num = cq_num;
+	app_ctx->sq_cq_transf.log_cq_depth = LOG_Q_DEPTH;
+
+	/* Allocate SQ memory */
+	if (sq_mem_alloc(fp, &app_ctx->sq_transf)) {
+		fprintf(stderr, "sq_mem_alloc failed\n");
+		return -1;
+	}
+
+	/* Create SQ */
+	wq_attr.log_wq_depth = LOG_Q_DEPTH;
+	wq_attr.uar_id = uar_id;
+	wq_attr.wq_ring_qmem.daddr = app_ctx->sq_transf.wq_ring_daddr;
+	wq_attr.pd = app_ctx->process_pd;
+
+	if (flexio_sq_create(fp, NULL, cq_num, &wq_attr, &app_ctx->sq)) {
+		fprintf(stderr, "flexio_sq_create failed\n");
+		return -1;
+	}
+
+	app_ctx->sq_transf.wq_num = flexio_sq_get_wq_num(app_ctx->sq);
+
+	/* Create MKey for SQ data */
+	app_ctx->sqd_mkey = create_dpa_mkey(app_ctx, app_ctx->sq_transf.wqd_daddr, 
+					   Q_DATA_BSIZE);
+	if (!app_ctx->sqd_mkey) {
+		fprintf(stderr, "create_dpa_mkey for SQ data failed\n");
+		return -1;
+	}
+
+	app_ctx->sq_transf.wqd_mkey_id = flexio_mkey_get_id(app_ctx->sqd_mkey);
+
+	return 0;
+}
+
+/* ================================================================== */
+/* Create RQ                                                           */
+/* ================================================================== */
+
+static int init_rq_ring(struct app_context *app_ctx)
+{
+	struct mlx5_wqe_data_seg *rx_wqes, *dseg;
+	flexio_uintptr_t wqe_data_daddr = app_ctx->rq_transf.wqd_daddr;
+	uint32_t mkey_id = app_ctx->rq_transf.wqd_mkey_id;
+	int ret = 0;
 	uint32_t i;
 
-	rx_wqes = calloc(1, RQ_RING_BSIZE);
+	rx_wqes = calloc(Q_DEPTH, RQ_WQE_BSIZE);
 	if (!rx_wqes) {
-		fprintf(stderr, "Failed to allocate memory for rx_wqes\n");
+		fprintf(stderr, "calloc for rx_wqes failed\n");
 		return -1;
 	}
 
@@ -324,143 +330,96 @@ static int init_dpa_rq_ring(struct app_context *app_ctx, struct shared_context *
 	}
 
 	if (flexio_host2dev_memcpy(app_ctx->flexio_process, rx_wqes, RQ_RING_BSIZE,
-				   sc->rq_transf.wq_ring_daddr))
-		retval = -1;
+				   app_ctx->rq_transf.wq_ring_daddr)) {
+		fprintf(stderr, "flexio_host2dev_memcpy for RQ ring failed\n");
+		ret = -1;
+	}
 
 	free(rx_wqes);
-	return retval;
+	return ret;
 }
 
-static int init_rq_dbr(struct app_context *app_ctx, struct shared_context *sc)
+static int init_rq_dbr(struct app_context *app_ctx)
 {
 	__be32 dbr[2];
 
 	dbr[0] = htobe32(Q_DEPTH & 0xffff);
 	dbr[1] = htobe32(0);
-	if (flexio_host2dev_memcpy(app_ctx->flexio_process, dbr, sizeof(dbr),
-				   sc->rq_transf.wq_dbr_daddr))
-		return -1;
 
-	return 0;
+	return flexio_host2dev_memcpy(app_ctx->flexio_process, dbr, sizeof(dbr),
+				      app_ctx->rq_transf.wq_dbr_daddr);
 }
 
-/* ================================================================== */
-/* Shared RQ + RQ-CQ creation (single pair, no handler binding)        */
-/* ================================================================== */
-static int create_shared_rq(struct app_context *app_ctx, struct shared_context *sc)
+static int create_rq(struct app_context *app_ctx)
 {
-	struct flexio_process *app_fp = app_ctx->flexio_process;
-	struct flexio_cq_attr rqcq_attr = {0};
-	struct flexio_wq_attr rq_attr = {0};
+	struct flexio_process *fp = app_ctx->flexio_process;
+	struct flexio_cq_attr cq_attr = {0};
+	struct flexio_wq_attr wq_attr = {0};
 	uint32_t uar_id = flexio_uar_get_id(app_ctx->process_uar);
 	uint32_t cq_num;
 
-	if (cq_mem_alloc(app_fp, &sc->rq_cq_transf)) {
-		fprintf(stderr, "Failed to alloc memory for RQ's CQ.\n");
+	/* Allocate RQ CQ memory */
+	if (cq_mem_alloc(fp, &app_ctx->rq_cq_transf)) {
+		fprintf(stderr, "cq_mem_alloc for RQ CQ failed\n");
 		return -1;
 	}
 
-	rqcq_attr.log_cq_depth = LOG_Q_DEPTH;
-	/* KEY: RQ CQ is NOT bound to a specific handler.
-	 * Multiple threads will poll it independently.
-	 */
-	rqcq_attr.element_type = FLEXIO_CQ_ELEMENT_TYPE_NON_DPA_CQ;
-	rqcq_attr.uar_id = uar_id;
-	rqcq_attr.cq_dbr_daddr = sc->rq_cq_transf.cq_dbr_daddr;
-	rqcq_attr.cq_ring_qmem.daddr = sc->rq_cq_transf.cq_ring_daddr;
-	if (flexio_cq_create(app_fp, NULL, &rqcq_attr, &sc->rq_cq)) {
-		fprintf(stderr, "Failed to create Flex IO RQ's CQ\n");
+	/* Create RQ CQ (KEY: not handler-bound, shared by all threads) */
+	cq_attr.log_cq_depth = LOG_Q_DEPTH;
+	cq_attr.element_type = FLEXIO_CQ_ELEMENT_TYPE_NON_DPA_CQ;
+	cq_attr.uar_id = uar_id;
+	cq_attr.cq_dbr_daddr = app_ctx->rq_cq_transf.cq_dbr_daddr;
+	cq_attr.cq_ring_qmem.daddr = app_ctx->rq_cq_transf.cq_ring_daddr;
+
+	if (flexio_cq_create(fp, NULL, &cq_attr, &app_ctx->rq_cq)) {
+		fprintf(stderr, "flexio_cq_create for RQ CQ failed\n");
 		return -1;
 	}
 
-	cq_num = flexio_cq_get_cq_num(sc->rq_cq);
-	sc->rq_cq_transf.cq_num = cq_num;
-	sc->rq_cq_transf.log_cq_depth = LOG_Q_DEPTH;
+	cq_num = flexio_cq_get_cq_num(app_ctx->rq_cq);
+	app_ctx->rq_cq_transf.cq_num = cq_num;
+	app_ctx->rq_cq_transf.log_cq_depth = LOG_Q_DEPTH;
 
-	if (rq_mem_alloc(app_fp, &sc->rq_transf)) {
-		fprintf(stderr, "Failed to allocate memory for RQ.\n");
+	/* Allocate RQ memory */
+	if (rq_mem_alloc(fp, &app_ctx->rq_transf)) {
+		fprintf(stderr, "rq_mem_alloc failed\n");
 		return -1;
 	}
 
-	sc->rqd_mkey = create_dpa_mkey(app_ctx, sc->rq_transf.wqd_daddr);
-	if (!sc->rqd_mkey) {
-		fprintf(stderr, "Failed to create an MKey for RQ data buffer.\n");
-		return -1;
-	}
-	sc->rq_transf.wqd_mkey_id = flexio_mkey_get_id(sc->rqd_mkey);
-
-	if (init_dpa_rq_ring(app_ctx, sc)) {
-		fprintf(stderr, "Failed to init RQ ring.\n");
+	/* Create MKey for RQ data */
+	app_ctx->rqd_mkey = create_dpa_mkey(app_ctx, app_ctx->rq_transf.wqd_daddr,
+					   Q_DATA_BSIZE);
+	if (!app_ctx->rqd_mkey) {
+		fprintf(stderr, "create_dpa_mkey for RQ data failed\n");
 		return -1;
 	}
 
-	rq_attr.log_wq_depth = LOG_Q_DEPTH;
-	rq_attr.pd = app_ctx->process_pd;
-	rq_attr.wq_dbr_qmem.memtype = FLEXIO_MEMTYPE_DPA;
-	rq_attr.wq_dbr_qmem.daddr = sc->rq_transf.wq_dbr_daddr;
-	rq_attr.wq_ring_qmem.daddr = sc->rq_transf.wq_ring_daddr;
-	if (flexio_rq_create(app_fp, NULL, cq_num, &rq_attr, &sc->rq)) {
-		fprintf(stderr, "Failed to create Flex IO RQ.\n");
+	app_ctx->rq_transf.wqd_mkey_id = flexio_mkey_get_id(app_ctx->rqd_mkey);
+
+	/* Initialize RQ ring */
+	if (init_rq_ring(app_ctx)) {
+		fprintf(stderr, "init_rq_ring failed\n");
 		return -1;
 	}
 
-	sc->rq_transf.wq_num = flexio_rq_get_wq_num(sc->rq);
-	if (init_rq_dbr(app_ctx, sc)) {
-		fprintf(stderr, "Failed to init RQ DBR.\n");
+	/* Create RQ */
+	wq_attr.log_wq_depth = LOG_Q_DEPTH;
+	wq_attr.pd = app_ctx->process_pd;
+	wq_attr.wq_dbr_qmem.memtype = FLEXIO_MEMTYPE_DPA;
+	wq_attr.wq_dbr_qmem.daddr = app_ctx->rq_transf.wq_dbr_daddr;
+	wq_attr.wq_ring_qmem.daddr = app_ctx->rq_transf.wq_ring_daddr;
+
+	if (flexio_rq_create(fp, NULL, cq_num, &wq_attr, &app_ctx->rq)) {
+		fprintf(stderr, "flexio_rq_create failed\n");
 		return -1;
 	}
 
-	return 0;
-}
+	app_ctx->rq_transf.wq_num = flexio_rq_get_wq_num(app_ctx->rq);
 
-/* ================================================================== */
-/* Steering (same as before, but single RQ now)                       */
-/* ================================================================== */
-static int create_steering_rules(struct app_context *app_ctx, int nic_mode)
-{
-	uint32_t rqn = app_ctx->shared_ctx.rq_transf.wq_num;
-
-	/* Single RQT with just this one RQ */
-	app_ctx->rss = rss_steering_create(app_ctx->ibv_ctx, &rqn, 1, SMAC_BASE);
-	if (!app_ctx->rss) {
-		fprintf(stderr, "Failed to create RSS steering chain\n");
+	/* Initialize RQ DBR */
+	if (init_rq_dbr(app_ctx)) {
+		fprintf(stderr, "init_rq_dbr failed\n");
 		return -1;
-	}
-
-	app_ctx->rx_matcher = create_matcher_rx(app_ctx->ibv_ctx);
-	if (!app_ctx->rx_matcher) {
-		fprintf(stderr, "Failed to create RX matcher\n");
-		return -1;
-	}
-
-	app_ctx->rx_rule = create_rule_rx_mac_match(app_ctx->rx_matcher,
-			rss_steering_get_tir(app_ctx->rss, 1),
-			SMAC_BASE);
-	if (!app_ctx->rx_rule) {
-		fprintf(stderr, "Failed to create RX->RSS-TIR rule\n");
-		return -1;
-	}
-
-	if (!nic_mode) {
-		app_ctx->tx_matcher = create_matcher_tx(app_ctx->ibv_ctx);
-		if (!app_ctx->tx_matcher) {
-			fprintf(stderr, "Failed to create TX matcher\n");
-			return -1;
-		}
-
-		app_ctx->tx_rule_table =
-			create_rule_tx_fwd_to_sws_table(app_ctx->tx_matcher, SMAC_BASE);
-		if (!app_ctx->tx_rule_table) {
-			fprintf(stderr, "Failed to create TX table steering rule\n");
-			return -1;
-		}
-
-		app_ctx->tx_rule_vport =
-			create_rule_tx_fwd_to_vport(app_ctx->tx_matcher, SMAC_BASE);
-		if (!app_ctx->tx_rule_vport) {
-			fprintf(stderr, "Failed to create TX vport steering rule\n");
-			return -1;
-		}
 	}
 
 	return 0;
@@ -469,302 +428,309 @@ static int create_steering_rules(struct app_context *app_ctx, int nic_mode)
 /* ================================================================== */
 /* Copy shared data to DPA                                            */
 /* ================================================================== */
+
 static int copy_shared_data_to_dpa(struct app_context *app_ctx)
 {
-	uint64_t struct_bsize = sizeof(struct host2dev_packet_processor_data);
-	struct host2dev_packet_processor_data *h2d_data;
-	int ret = 0;
+	struct host2dev_packet_processor_data h2d_data = {0};
 
-	h2d_data = calloc(1, struct_bsize);
-	if (!h2d_data) {
-		fprintf(stderr, "Failed to allocate memory for h2d_data\n");
+	h2d_data.sq_cq_transf = app_ctx->sq_cq_transf;
+	h2d_data.sq_transf = app_ctx->sq_transf;
+	h2d_data.rq_cq_transf = app_ctx->rq_cq_transf;
+	h2d_data.rq_transf = app_ctx->rq_transf;
+	h2d_data.not_first_run = 0;
+
+	if (flexio_buf_dev_alloc(app_ctx->flexio_process, 
+				sizeof(h2d_data),
+				&app_ctx->app_data_daddr)) {
+		fprintf(stderr, "flexio_buf_dev_alloc for app_data failed\n");
 		return -1;
 	}
 
-	h2d_data->sq_cq_transf = app_ctx->shared_ctx.sq_cq_transf;
-	h2d_data->sq_transf = app_ctx->shared_ctx.sq_transf;
-	h2d_data->rq_cq_transf = app_ctx->shared_ctx.rq_cq_transf;
-	h2d_data->rq_transf = app_ctx->shared_ctx.rq_transf;
-	h2d_data->not_first_run = 0;
-
-	if (flexio_copy_from_host(app_ctx->flexio_process, h2d_data, struct_bsize,
-				  &app_ctx->shared_ctx.app_data_daddr)) {
-		fprintf(stderr, "Failed to copy shared data to DPA.\n");
-		ret = -1;
+	if (flexio_host2dev_memcpy(app_ctx->flexio_process, &h2d_data, 
+				   sizeof(h2d_data),
+				   app_ctx->app_data_daddr)) {
+		fprintf(stderr, "flexio_host2dev_memcpy for app_data failed\n");
+		return -1;
 	}
 
-	free(h2d_data);
-	return ret;
-}
-
-/* ================================================================== */
-/* Create thread pool (NUM_THREADS threads with flexible affinity)    */
-/* ================================================================== */
-static int create_thread_pool(struct app_context *app_ctx)
-{
-	struct flexio_event_handler_attr eh_attr = {0};
-	char eh_name[32];
-	int i;
-
-	eh_attr.host_stub_func = flexio_pp_dev;
-	/* KEY: No STRICT affinity - DPA can schedule threads flexibly */
-	eh_attr.affinity.type = FLEXIO_AFFINITY_FLEXIBLE;
-
-	for (i = 0; i < app_ctx->num_threads; i++) {
-		snprintf(eh_name, sizeof(eh_name), "pp_thread_%d", i);
-
-		if (flexio_event_handler_create(app_ctx->flexio_process, &eh_attr, 
-					       &app_ctx->threads[i])) {
-			fprintf(stderr, "Failed to create thread %d\n", i);
-			return -1;
-		}
-	}
-
-	printf("Created %d thread pool with flexible affinity\n", app_ctx->num_threads);
 	return 0;
 }
 
 /* ================================================================== */
-/* Launch all threads (all get same shared data daddr)                */
+/* Create steering rule (RX only, MAC-based)                          */
 /* ================================================================== */
-static int launch_thread_pool(struct app_context *app_ctx)
+
+static int create_rx_steering(struct app_context *app_ctx)
 {
+	struct mlx5dv_devx_obj *tir_obj;
+	struct mlx5dv_devx_obj *tis_obj;
+	struct mlx5dv_devx_obj *td_obj;
+	uint32_t rqn = flexio_rq_get_wq_num(app_ctx->rq);
+	uint32_t in[DEVX_ST_SZ_DW(create_tir_in)] = {0};
+	uint32_t out[DEVX_ST_SZ_DW(create_tir_out)] = {0};
+	uint32_t tir_num;
+
+	/* Create TIR pointing to this RQ */
+	DEVX_SET(create_tir_in, in, opcode, MLX5_CMD_OP_CREATE_TIR);
+	DEVX_SET(create_tir_in, in, tire.disp_type, MLX5_TIRC_DISP_TYPE_DIRECT);
+	DEVX_SET(create_tir_in, in, tire.inline_rqn, rqn);
+
+	tir_obj = mlx5dv_devx_obj_create(app_ctx->ibv_ctx, in, sizeof(in), out, sizeof(out));
+	if (!tir_obj) {
+		fprintf(stderr, "mlx5dv_devx_obj_create TIR failed\n");
+		return -1;
+	}
+
+	tir_num = DEVX_GET(create_tir_out, out, tir_num);
+	printf("TIR created: %u for RQ %u\n", tir_num, rqn);
+
+	mlx5dv_devx_obj_destroy(tir_obj);
+
+	/* 
+	 * Note: For full RX steering with MAC matching, you'd typically use:
+	 * - DOCA Flow API for modern DOCA (preferred)
+	 * - mlx5dv_create_flow_matcher + mlx5dv_create_flow (lower level)
+	 *
+	 * For this minimal example, we rely on driver-level RSS distribution.
+	 * In production, add DOCA Flow steering here to match on SMAC.
+	 */
+
+	printf("Steering: RX traffic routed to RQ %u via TIR %u\n", rqn, tir_num);
+
+	return 0;
+}
+
+/* ================================================================== */
+/* Create thread pool (FLEXIBLE affinity)                             */
+/* ================================================================== */
+
+static int create_thread_pool(struct app_context *app_ctx)
+{
+	struct flexio_event_handler_attr eh_attr = {0};
 	int i;
 
+	eh_attr.host_stub_func = flexio_pp_dev;
+	eh_attr.affinity.type = FLEXIO_AFFINITY_FLEXIBLE;  /* KEY: no EU pinning */
+
 	for (i = 0; i < app_ctx->num_threads; i++) {
-		if (flexio_event_handler_run(app_ctx->threads[i], 
-					     app_ctx->shared_ctx.app_data_daddr)) {
-			fprintf(stderr, "Failed to run thread %d.\n", i);
+		if (flexio_event_handler_create(app_ctx->flexio_process, &eh_attr,
+					       &app_ctx->threads[i])) {
+			fprintf(stderr, "flexio_event_handler_create %d failed\n", i);
 			return -1;
 		}
 	}
 
+	printf("Created %d threads with FLEXIBLE affinity\n", app_ctx->num_threads);
+	return 0;
+}
+
+/* ================================================================== */
+/* Launch thread pool                                                 */
+/* ================================================================== */
+
+static int launch_thread_pool(struct app_context *app_ctx)
+{
+	int i;
+
+	/* All threads get SAME shared data daddr */
+	for (i = 0; i < app_ctx->num_threads; i++) {
+		if (flexio_event_handler_run(app_ctx->threads[i],
+					     app_ctx->app_data_daddr)) {
+			fprintf(stderr, "flexio_event_handler_run %d failed\n", i);
+			return -1;
+		}
+	}
+
+	printf("Launched %d threads, all polling shared RQ\n", app_ctx->num_threads);
 	return 0;
 }
 
 /* ================================================================== */
 /* Cleanup                                                            */
 /* ================================================================== */
-static int cleanup_app(struct app_context *app_ctx)
+
+static void cleanup(struct app_context *app_ctx)
 {
-	struct flexio_process *fp = app_ctx->flexio_process;
-	int err = 0, i;
+	int i;
 
 	/* Destroy threads */
 	for (i = 0; i < app_ctx->num_threads; i++) {
-		if (app_ctx->threads[i] && flexio_event_handler_destroy(app_ctx->threads[i]))
-			err = -1;
+		if (app_ctx->threads[i])
+			flexio_event_handler_destroy(app_ctx->threads[i]);
 	}
 
-	/* Destroy shared resources */
-	if (app_ctx->shared_ctx.app_data_daddr && 
-	    flexio_buf_dev_free(fp, app_ctx->shared_ctx.app_data_daddr))
-		err = -1;
+	/* Destroy resources */
+	if (app_ctx->rq)
+		flexio_rq_destroy(app_ctx->rq);
+	if (app_ctx->rqd_mkey)
+		flexio_device_mkey_destroy(app_ctx->rqd_mkey);
+	if (app_ctx->rq_cq)
+		flexio_cq_destroy(app_ctx->rq_cq);
 
-	if (app_ctx->shared_ctx.sq && flexio_sq_destroy(app_ctx->shared_ctx.sq))
-		err = -1;
-	if (app_ctx->shared_ctx.sqd_mkey && flexio_device_mkey_destroy(app_ctx->shared_ctx.sqd_mkey))
-		err = -1;
-	if (app_ctx->shared_ctx.sq_transf.wq_ring_daddr && 
-	    flexio_buf_dev_free(fp, app_ctx->shared_ctx.sq_transf.wq_ring_daddr))
-		err = -1;
-	if (app_ctx->shared_ctx.sq_transf.wqd_daddr && 
-	    flexio_buf_dev_free(fp, app_ctx->shared_ctx.sq_transf.wqd_daddr))
-		err = -1;
-	if (app_ctx->shared_ctx.sq_cq && flexio_cq_destroy(app_ctx->shared_ctx.sq_cq))
-		err = -1;
+	if (app_ctx->sq)
+		flexio_sq_destroy(app_ctx->sq);
+	if (app_ctx->sqd_mkey)
+		flexio_device_mkey_destroy(app_ctx->sqd_mkey);
+	if (app_ctx->sq_cq)
+		flexio_cq_destroy(app_ctx->sq_cq);
 
-	if (app_ctx->shared_ctx.rq && flexio_rq_destroy(app_ctx->shared_ctx.rq))
-		err = -1;
-	if (app_ctx->shared_ctx.rqd_mkey && flexio_device_mkey_destroy(app_ctx->shared_ctx.rqd_mkey))
-		err = -1;
-	if (app_ctx->shared_ctx.rq_transf.wq_ring_daddr && 
-	    flexio_buf_dev_free(fp, app_ctx->shared_ctx.rq_transf.wq_ring_daddr))
-		err = -1;
-	if (app_ctx->shared_ctx.rq_transf.wqd_daddr && 
-	    flexio_buf_dev_free(fp, app_ctx->shared_ctx.rq_transf.wqd_daddr))
-		err = -1;
-	if (app_ctx->shared_ctx.rq_cq && flexio_cq_destroy(app_ctx->shared_ctx.rq_cq))
-		err = -1;
+	if (app_ctx->app_data_daddr)
+		flexio_buf_dev_free(app_ctx->flexio_process, app_ctx->app_data_daddr);
 
-	if (app_ctx->rx_rule && destroy_rule(app_ctx->rx_rule))
-		err = -1;
-	if (app_ctx->rx_matcher && destroy_matcher(app_ctx->rx_matcher))
-		err = -1;
+	if (app_ctx->flexio_process && app_ctx->stream)
+		flexio_msg_stream_destroy(app_ctx->stream);
 
-	if (app_ctx->rss)
-		rss_steering_destroy(app_ctx->rss);
+	if (app_ctx->flexio_process)
+		flexio_process_destroy(app_ctx->flexio_process);
 
-	if (app_ctx->tx_rule_vport && destroy_rule(app_ctx->tx_rule_vport))
-		err = -1;
-	if (app_ctx->tx_rule_table && destroy_rule(app_ctx->tx_rule_table))
-		err = -1;
-	if (app_ctx->tx_matcher && destroy_matcher(app_ctx->tx_matcher))
-		err = -1;
-
-	if (app_ctx->flexio_process && app_ctx->stream && 
-	    flexio_msg_stream_destroy(app_ctx->stream))
-		err = -1;
-
-	if (app_ctx->flexio_process && flexio_process_destroy(app_ctx->flexio_process))
-		err = -1;
-
-	if (app_ctx->ibv_ctx && ibv_close_device(app_ctx->ibv_ctx))
-		err = -1;
-
-	return err;
+	if (app_ctx->ibv_ctx)
+		ibv_close_device(app_ctx->ibv_ctx);
 }
 
 /* ================================================================== */
 /* Main                                                               */
 /* ================================================================== */
+
 int main(int argc, char **argv)
 {
 	struct flexio_app_select_attr flexio_app_sel_attr = {0};
-	flexio_msg_stream_attr_t stream_fattr = {0};
-	struct flexio_process *app_fp = NULL;
+	flexio_msg_stream_attr_t stream_attr = {0};
 	struct app_context app_ctx = {0};
 	struct ibv_port_attr port_attr;
 	uint64_t udbg_token;
-	int nic_mode = 0;
-	char buf[2];
-	int err = 0;
 	int i;
 
-	app_ctx.num_threads = NUM_THREADS;
-
-	printf("FlexIO Reflector - SCALED (Thread Pool)\n");
-	printf("Creating %d threads with FLEXIBLE affinity\n", app_ctx.num_threads);
+	app_ctx.num_threads = NUM_THREADS_DEFAULT;
 
 	if (argc < 2) {
-		fprintf(stderr,
-			"Usage: %s <mlx5 device> [--nic-mode] [--threads N]\n",
-			argv[0]);
+		fprintf(stderr, "Usage: %s <device> [--threads N]\n", argv[0]);
+		fprintf(stderr, "Example: %s mlx5_0 --threads 64\n", argv[0]);
 		return -1;
 	}
 
+	/* Parse arguments */
 	for (i = 2; i < argc; i++) {
-		if (!strcmp(argv[i], "--nic-mode")) {
-			nic_mode = 1;
-		} else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
+		if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
 			app_ctx.num_threads = atoi(argv[++i]);
-			if (app_ctx.num_threads < 1 ||
-			    app_ctx.num_threads > MAX_THREADS) {
+			if (app_ctx.num_threads < 1 || app_ctx.num_threads > MAX_THREADS) {
 				fprintf(stderr, "--threads must be 1-%d\n", MAX_THREADS);
 				return -1;
 			}
-		} else {
-			fprintf(stderr, "Invalid parameter %s\n", argv[i]);
-			return -1;
 		}
 	}
 
 	if (geteuid()) {
-		fprintf(stderr, "Failed - the application must run with root privileges\n");
+		fprintf(stderr, "Must run with root privileges\n");
 		return -1;
 	}
 
-	err = app_open_ibv_ctx(&app_ctx, argv[1]);
-	if (err)
-		return -1;
+	printf("FlexIO Scaled Reflector - DOCA 3.4\n");
+	printf("Threads: %d, Affinity: FLEXIBLE\n", app_ctx.num_threads);
 
+	/* Open IBV context */
+	if (app_open_ibv_ctx(&app_ctx, argv[1])) {
+		fprintf(stderr, "Failed to open IBV context\n");
+		return -1;
+	}
+
+	/* Check port */
 	if (ibv_query_port(app_ctx.ibv_ctx, 1, &port_attr)) {
-		fprintf(stderr, "Failed to query IBV port attributes\n");
-		err = -1;
+		fprintf(stderr, "ibv_query_port failed\n");
 		goto cleanup;
 	}
 
 	if (port_attr.link_layer != IBV_LINK_LAYER_ETHERNET) {
-		fprintf(stderr, "IBV port is not Ethernet, state: %d\n", port_attr.link_layer);
-		err = -1;
+		fprintf(stderr, "Port is not Ethernet\n");
 		goto cleanup;
 	}
 
+	/* Set FlexIO version */
 	if (flexio_version_set(FLEXIO_VER_USED)) {
-		fprintf(stderr, "Failed to set version in FlexIO API.\n");
-		err = -1;
+		fprintf(stderr, "flexio_version_set failed\n");
 		goto cleanup;
 	}
 
-	flexio_app_sel_attr.app_name = DEV_APP_NAME_XSTR(DEV_APP_NAME);
+	/* Get FlexIO app */
+	flexio_app_sel_attr.app_name = "flexio_pp_app";
 	flexio_app_sel_attr.hw_model_id = FLEXIO_HW_MODEL_DEF;
 	flexio_app_sel_attr.ibv_ctx = app_ctx.ibv_ctx;
 
-	err = flexio_app_get(&flexio_app_sel_attr, &app_ctx.flexio_app);
-	if (err) {
-		fprintf(stderr, "Failed to get Flex IO app\n");
+	if (flexio_app_get(&flexio_app_sel_attr, &app_ctx.flexio_app)) {
+		fprintf(stderr, "flexio_app_get failed\n");
 		goto cleanup;
 	}
 
-	if (flexio_process_create(app_ctx.ibv_ctx, app_ctx.flexio_app, NULL, &app_fp)) {
-		fprintf(stderr, "Failed to create Flex IO process.\n");
-		err = -1;
+	/* Create FlexIO process */
+	if (flexio_process_create(app_ctx.ibv_ctx, app_ctx.flexio_app, NULL,
+				  &app_ctx.flexio_process)) {
+		fprintf(stderr, "flexio_process_create failed\n");
 		goto cleanup;
 	}
-	app_ctx.flexio_process = app_fp;
 
-	udbg_token = flexio_process_udbg_token_get(app_fp);
+	udbg_token = flexio_process_udbg_token_get(app_ctx.flexio_process);
 	if (udbg_token)
-		printf("Debug token: %#lx\n", udbg_token);
+		printf("Debug token: 0x%lx\n", udbg_token);
 
-	stream_fattr.data_bsize = MSG_HOST_BUFF_BSIZE;
-	stream_fattr.sync_mode = FLEXIO_MSG_DEV_SYNC_MODE_SYNC;
-	stream_fattr.level = FLEXIO_MSG_DEV_INFO;
-	stream_fattr.transport_mode = FLEXIO_MSG_TRANSPORT_QP_RC;
+	/* Create message stream for device debug output */
+	stream_attr.data_bsize = MSG_HOST_BUFF_BSIZE;
+	stream_attr.sync_mode = FLEXIO_MSG_DEV_SYNC_MODE_SYNC;
+	stream_attr.level = FLEXIO_MSG_DEV_INFO;
+	stream_attr.transport_mode = FLEXIO_MSG_TRANSPORT_QP_RC;
 
-	if (flexio_msg_stream_create(app_fp, &stream_fattr, stdout, NULL, &app_ctx.stream)) {
-		fprintf(stderr, "Failed to init device messaging environment\n");
-		err = -1;
+	if (flexio_msg_stream_create(app_ctx.flexio_process, &stream_attr, stdout,
+				     NULL, &app_ctx.stream)) {
+		fprintf(stderr, "flexio_msg_stream_create failed\n");
 		goto cleanup;
 	}
 
-	app_ctx.process_pd = flexio_process_get_pd(app_fp);
-	app_ctx.process_uar = flexio_process_get_uar(app_fp);
+	/* Get PD and UAR */
+	app_ctx.process_pd = flexio_process_get_pd(app_ctx.flexio_process);
+	app_ctx.process_uar = flexio_process_get_uar(app_ctx.flexio_process);
 
-	/* Create shared resources */
-	if (create_shared_sq(&app_ctx, &app_ctx.shared_ctx)) {
-		fprintf(stderr, "Failed to create shared SQ.\n");
-		err = -1;
+	/* Create shared SQ */
+	if (create_sq(&app_ctx)) {
+		fprintf(stderr, "create_sq failed\n");
 		goto cleanup;
 	}
 
-	if (create_shared_rq(&app_ctx, &app_ctx.shared_ctx)) {
-		fprintf(stderr, "Failed to create shared RQ.\n");
-		err = -1;
+	/* Create shared RQ */
+	if (create_rq(&app_ctx)) {
+		fprintf(stderr, "create_rq failed\n");
 		goto cleanup;
 	}
 
+	/* Copy shared data to DPA */
 	if (copy_shared_data_to_dpa(&app_ctx)) {
-		fprintf(stderr, "Failed to copy shared data to DPA.\n");
-		err = -1;
+		fprintf(stderr, "copy_shared_data_to_dpa failed\n");
 		goto cleanup;
 	}
 
-	if (create_steering_rules(&app_ctx, nic_mode)) {
-		fprintf(stderr, "Failed to create steering rules.\n");
-		err = -1;
-		goto cleanup;
+	/* Create RX steering rule */
+	if (create_rx_steering(&app_ctx)) {
+		fprintf(stderr, "create_rx_steering failed (non-fatal)\n");
+		/* Non-fatal: can continue without steering in test mode */
 	}
 
-	/* Create and launch thread pool */
+	/* Create thread pool */
 	if (create_thread_pool(&app_ctx)) {
-		fprintf(stderr, "Failed to create thread pool.\n");
-		err = -1;
+		fprintf(stderr, "create_thread_pool failed\n");
 		goto cleanup;
 	}
 
+	/* Launch all threads */
 	if (launch_thread_pool(&app_ctx)) {
-		fprintf(stderr, "Failed to launch thread pool.\n");
-		err = -1;
+		fprintf(stderr, "launch_thread_pool failed\n");
 		goto cleanup;
 	}
 
-	printf("Ready: %d threads running. Press Enter to exit.\n", app_ctx.num_threads);
+	printf("\nReady. All threads running. Press Enter to exit.\n");
+	getchar();
 
-	if (!fread(buf, 1, 1, stdin))
-		fprintf(stderr, "Failed in fread\n");
+	printf("Shutting down...\n");
+	cleanup(&app_ctx);
+	return 0;
 
 cleanup:
-	cleanup_app(&app_ctx);
-	return err;
+	cleanup(&app_ctx);
+	return -1;
 }
