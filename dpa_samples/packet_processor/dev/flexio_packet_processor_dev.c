@@ -7,6 +7,9 @@
  * MAC swap prevents packet loop on reflector
  */
 
+#include <libflexio/flexio_ver.h>
+#define FLEXIO_DEV_VER_USED FLEXIO_VER(26, 4, 0)
+
 #include <libflexio-dev/flexio_dev_debug.h>
 #include <libflexio-dev/flexio_dev_err.h>
 #include <libflexio-dev/flexio_dev_queue_access.h>
