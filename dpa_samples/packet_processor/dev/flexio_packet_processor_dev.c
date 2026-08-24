@@ -1,250 +1,217 @@
 /*
- * FLEXIO SCALED REFLECTOR - DEVICE SIDE (DPA)
- * DOCA 3.4 / FlexIO 26.4
- * Based on BenchBF3: shared RQ/SQ with thread pool polling same CQ
- * 
- * Key: CQE ownership bits handle thread safety for shared CQ polling
- * MAC swap prevents packet loop on reflector
+ * SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES.
+ * Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+/* Source file for device part of packet processing sample.
+ * Contain functions for initialize contexts of internal queues,
+ * read, check, change and resend the packet and wait for another.
  */
 
-#include <libflexio/flexio_ver.h>
-#define FLEXIO_DEV_VER_USED FLEXIO_VER(26, 4, 0)
-
-#include <libflexio-dev/flexio_dev_debug.h>
+/* Shared header file with utilities for samples.
+ * The file also have includes to flexio_dev_ver.h and flexio_dev.h
+ * The include must be placed first to correctly handle the version.
+ */
+#include "com_dev.h"
 #include <libflexio-dev/flexio_dev_err.h>
 #include <libflexio-dev/flexio_dev_queue_access.h>
 #include <libflexio-libc/string.h>
 #include <stddef.h>
 #include <dpaintrin.h>
-#include "flexio_packet_processor_com.h"
+/* Shared header file for packet processor sample */
+#include "../flexio_packet_processor_com.h"
 
-/* ================================================================== */
-/* CONFIGURATION                                                      */
-/* ================================================================== */
+/* Mask for CQ index */
+#define CQ_IDX_MASK ((1 << LOG_CQ_DEPTH) - 1)
+/* Mask for RQ index */
+#define RQ_IDX_MASK ((1 << LOG_RQ_DEPTH) - 1)
+/* Mask for SQ index */
+#define SQ_IDX_MASK ((1 << (LOG_SQ_DEPTH + LOG_SQE_NUM_SEGS)) - 1)
+/* Mask for data index */
+#define DATA_IDX_MASK ((1 << (LOG_SQ_DEPTH)) - 1)
 
-#define CQ_IDX_MASK ((1 << 8) - 1)        /* LOG_Q_DEPTH=8 */
-#define RQ_IDX_MASK ((1 << 8) - 1)
-#define SQ_IDX_MASK ((1 << (8 + 2)) - 1)  /* 3 WQE segments per queue depth */
-#define DATA_IDX_MASK ((1 << 8) - 1)
-
-/* ================================================================== */
-/* SHARED CONTEXT (all threads use this)                             */
-/* ================================================================== */
-
+/* The structure of the sample DPA application contains global data that the application uses */
 static struct {
-	/* Counters */
+	/* Packet count - used for debug message */
 	uint64_t packets_count;
+	/* lkey - local memory key */
 	uint32_t lkey;
 
-	/* Queue contexts (SHARED by all threads) */
-	cq_ctx_t rq_cq_ctx;
-	rq_ctx_t rq_ctx;
-	sq_ctx_t sq_ctx;
-	cq_ctx_t sq_cq_ctx;
-	dt_ctx_t dt_ctx;
-
+	cq_ctx_t rq_cq_ctx;     /* RQ CQ */
+	rq_ctx_t rq_ctx;        /* RQ */
+	sq_ctx_t sq_ctx;        /* SQ */
+	cq_ctx_t sq_cq_ctx;     /* SQ CQ */
+	dt_ctx_t dt_ctx;        /* SQ Data ring */
 } app_ctx;
 
-/* ================================================================== */
-/* HELPER: MAC SWAP (critical for reflector to avoid loop)            */
-/* ================================================================== */
-
-static inline void swap_macs(void *packet_data)
-{
-	uint8_t *p = (uint8_t *)packet_data;
-	uint8_t tmp[6];
-
-	/* Ethernet header: [dst MAC:6B][src MAC:6B][EtherType:2B][...] */
-	memcpy(tmp, p, 6);           /* tmp = original dst MAC */
-	memcpy(p, p + 6, 6);         /* dst MAC = src MAC */
-	memcpy(p + 6, tmp, 6);       /* src MAC = original dst MAC */
-}
-
-/* ================================================================== */
-/* INITIALIZE SHARED CONTEXT (called once by first thread to run)    */
-/* ================================================================== */
-
+/* Initialize the app_ctx structure from the host data.
+ *  data_from_host - pointer host2dev_packet_processor_data from host.
+ */
 static void app_ctx_init(struct host2dev_packet_processor_data *data_from_host)
 {
 	app_ctx.packets_count = 0;
 	app_ctx.lkey = data_from_host->sq_transf.wqd_mkey_id;
 
-	/* Initialize RQ CQ context */
+	/* Set context for RQ's CQ */
 	com_cq_ctx_init(&app_ctx.rq_cq_ctx,
 			data_from_host->rq_cq_transf.cq_num,
 			data_from_host->rq_cq_transf.log_cq_depth,
 			data_from_host->rq_cq_transf.cq_ring_daddr,
 			data_from_host->rq_cq_transf.cq_dbr_daddr);
 
-	/* Initialize RQ context */
+	/* Set context for RQ */
 	com_rq_ctx_init(&app_ctx.rq_ctx,
 			data_from_host->rq_transf.wq_num,
 			data_from_host->rq_transf.wq_ring_daddr,
 			data_from_host->rq_transf.wq_dbr_daddr);
 
-	/* Initialize SQ context */
+	/* Set context for SQ */
 	com_sq_ctx_init(&app_ctx.sq_ctx,
 			data_from_host->sq_transf.wq_num,
 			data_from_host->sq_transf.wq_ring_daddr);
 
-	/* Initialize SQ CQ context */
+	/* Set context for SQ's CQ */
 	com_cq_ctx_init(&app_ctx.sq_cq_ctx,
 			data_from_host->sq_cq_transf.cq_num,
 			data_from_host->sq_cq_transf.log_cq_depth,
 			data_from_host->sq_cq_transf.cq_ring_daddr,
 			data_from_host->sq_cq_transf.cq_dbr_daddr);
 
-	/* Initialize data transfer context */
+	/* Set context for data */
 	com_dt_ctx_init(&app_ctx.dt_ctx, data_from_host->sq_transf.wqd_daddr);
-
-	flexio_dev_print("DPA: app_ctx initialized. RQ=%u, SQ=%u\n",
-			 data_from_host->rq_transf.wq_num,
-			 data_from_host->sq_transf.wq_num);
 }
 
-/* ================================================================== */
-/* PROCESS ONE PACKET                                                 */
-/* ================================================================== */
-
+/* process packet - read it, swap MAC addresses, modify it, create a send WQE and send it back. */
 static void process_packet(void)
 {
+	/* RX packet handling variables */
 	struct flexio_dev_wqe_rcv_data_seg *rwqe;
+	/* RQ WQE index */
 	uint32_t rq_wqe_idx;
+	/* Pointer to RQ data */
 	char *rq_data;
-	uint32_t data_sz;
 
+	/* TX packet handling variables */
 	union flexio_dev_sqe_seg *swqe;
+	/* Pointer to SQ data */
 	char *sq_data;
 
-	/* Extract WQE index and packet size from completed CQE */
+	/* Size of the data */
+	uint32_t data_sz;
+
+	/* Extract relevant data from the CQE */
 	rq_wqe_idx = flexio_dev_cqe_get_wqe_counter(app_ctx.rq_cq_ctx.cqe);
 	data_sz = flexio_dev_cqe_get_byte_cnt(app_ctx.rq_cq_ctx.cqe);
 
-	if (data_sz == 0 || data_sz > 2048) {
-		flexio_dev_print("DPA: Invalid packet size %u\n", data_sz);
-		return;
-	}
-
-	/* Get RQ WQE and packet buffer */
+	/* Get the RQ WQE pointed to by the CQE */
 	rwqe = &app_ctx.rq_ctx.rq_ring[rq_wqe_idx & RQ_IDX_MASK];
+
+	/* Extract data (whole packet) pointed to by the RQ WQE */
 	rq_data = flexio_dev_rwqe_get_addr(rwqe);
 
-	/* Get SQ data buffer for this packet */
-	sq_data = get_next_dte(&app_ctx.dt_ctx, DATA_IDX_MASK, 11);
+	/* Take the next entry from the data ring */
+	sq_data = get_next_dte(&app_ctx.dt_ctx, DATA_IDX_MASK, LOG_WQD_CHUNK_BSIZE);
 
-	/* Copy packet data */
+	/* Copy received packet to sq_data as is */
 	memcpy(sq_data, rq_data, data_sz);
 
-	/* ============================================================== */
-	/* CRITICAL: SWAP MACs to avoid packet loop                       */
-	/* ============================================================== */
-	/* If packet is received with:
-	 *   src_mac = host_mac (e.g., AA:BB:CC:DD:EE:FF)
-	 *   dst_mac = nic_mac  (e.g., 02:08:A4:D8:FF:43)
-	 *
-	 * After MAC swap:
-	 *   src_mac = nic_mac  (02:08:A4:D8:FF:43)
-	 *   dst_mac = host_mac (AA:BB:CC:DD:EE:FF)
-	 *
-	 * When packet exits NIC and returns, RX rule matches on src_mac.
-	 * Since src_mac is now nic_mac (not host_mac), it won't re-enter.
-	 */
+	/* swap mac address */
 	swap_macs(sq_data);
 
-	/* ============================================================== */
-	/* BUILD SQ WQE (4 segments: CTRL, ETH, DATA, padding)            */
-	/* ============================================================== */
+	/* Primitive validation, that packet is our hardcoded */
+	if (data_sz == 65) {
+		/* modify UDP payload */
+		memcpy(sq_data + 0x2a, "  Event demo***************", 65 - 0x2a);
 
-	/* CTRL segment */
+		/* Set hexadecimal value by the index */
+		sq_data[0x2a] = "0123456789abcdef"[app_ctx.dt_ctx.tx_buff_idx & 0xf];
+	}
+
+	/* Take first segment for SQ WQE (3 segments will be used) */
 	swqe = get_next_sqe(&app_ctx.sq_ctx, SQ_IDX_MASK);
-	flexio_dev_swqe_seg_ctrl_set(swqe, app_ctx.sq_ctx.sq_pi,
-				     app_ctx.sq_ctx.sq_number,
+
+	/* Fill out 1-st segment (Control) */
+	flexio_dev_swqe_seg_ctrl_set(swqe, app_ctx.sq_ctx.sq_pi, app_ctx.sq_ctx.sq_number,
 				     FLEXIO_CTRL_SEG_CE_CQE_ON_CQE_ERROR,
 				     FLEXIO_CTRL_SEG_TYPE_SEND_EN);
 
-	/* ETH segment */
+	/* Fill out 2-nd segment (Ethernet) */
 	swqe = get_next_sqe(&app_ctx.sq_ctx, SQ_IDX_MASK);
 	flexio_dev_swqe_seg_eth_set(swqe, 0, 0, 0, NULL);
 
-	/* DATA segment */
+	/* Fill out 3-rd segment (Data) */
 	swqe = get_next_sqe(&app_ctx.sq_ctx, SQ_IDX_MASK);
-	flexio_dev_swqe_seg_mem_ptr_data_set(swqe, data_sz, app_ctx.lkey,
-					     (uint64_t)sq_data);
+	flexio_dev_swqe_seg_mem_ptr_data_set(swqe, data_sz, app_ctx.lkey, (uint64_t)sq_data);
 
-	/* Padding segment */
+	/* Send WQE is 4 WQEBBs need to skip the 4-th segment */
 	swqe = get_next_sqe(&app_ctx.sq_ctx, SQ_IDX_MASK);
 
-	/* Ring SQ doorbell to post WQE */
+	/* Ring DB */
 	__dpa_thread_fence(__DPA_MEMORY, __DPA_W, __DPA_W);
 	flexio_dev_qp_sq_ring_db(++app_ctx.sq_ctx.sq_pi, app_ctx.sq_ctx.sq_number);
 	__dpa_thread_fence(__DPA_MEMORY, __DPA_W, __DPA_W);
-
-	/* Increment RQ PI to return WQE to hardware */
 	flexio_dev_dbr_rq_inc_pi(app_ctx.rq_ctx.rq_dbr);
-
-	/* Update packet counter */
-	app_ctx.packets_count++;
 }
 
-/* ================================================================== */
-/* ENTRY POINT: DPA thread handler                                   */
-/* ================================================================== */
-
-/*
- * ARCHITECTURE:
- * - Multiple threads call this with SAME thread_arg (shared data daddr)
- * - Each thread independently polls the RQ CQ
- * - CQE ownership bits (managed by hardware) prevent double-processing
- *
- * THREAD SAFETY:
- * - HW sets owner bit when NIC completes packet → CQE ownership flips
- * - Thread reads CQE owner bit; if SW owns it, processes packet
- * - Thread steps CQ: com_step_cq() advances to next CQE, ownership flips
- * - Next thread sees HW ownership on next CQE, skips to following one
- * - Result: no locking needed; HW ownership serializes access
- *
- * INITIALIZATION:
- * - not_first_run flag prevents re-init of static app_ctx
- * - Multiple threads may see not_first_run==0 initially, but init is
- *   idempotent (just copies from host data), so no corruption
+/* Entry point function that host side call for the execute.
+ *  thread_arg - pointer to the host2dev_packet_processor_data structure
+ *     to transfer data from the host side.
  */
-
-extern flexio_func_t flexio_pp_dev;
+flexio_dev_event_handler_t flexio_pp_dev;
 __dpa_global__ void flexio_pp_dev(uint64_t thread_arg)
 {
-	struct host2dev_packet_processor_data *data_from_host =
-		(struct host2dev_packet_processor_data *)thread_arg;
+	struct host2dev_packet_processor_data *data_from_host = (void *)thread_arg;
 
-	/* Initialize app_ctx once (from shared host data) */
+	/* If the thread is executed for first time, then initialize the context
+	 */
 	if (!data_from_host->not_first_run) {
 		app_ctx_init(data_from_host);
 		data_from_host->not_first_run = 1;
 	}
 
-	/*
-	 * Poll loop: check CQE ownership bit
-	 *
-	 * Hardware sets owner bit when packet arrives. When SW (this thread)
-	 * sees SW ownership (cq_hw_owner_bit != actual owner), it means WE own
-	 * this CQE and can process it.
+	/* Poll CQ until the package is received.
 	 */
 	while (flexio_dev_cqe_get_owner(app_ctx.rq_cq_ctx.cqe) !=
 	       app_ctx.rq_cq_ctx.cq_hw_owner_bit) {
-		/* We own this CQE. Process the packet. */
+		/* Print the message */
+		flexio_dev_print("Process packet: %ld\n", app_ctx.packets_count++);
+		/* Update memory to DPA */
 		__dpa_thread_fence(__DPA_MEMORY, __DPA_R, __DPA_R);
+		/* Process the packet */
 		process_packet();
+		/* Update RQ CQ */
 		com_step_cq(&app_ctx.rq_cq_ctx);
-		__dpa_thread_fence(__DPA_MEMORY, __DPA_W, __DPA_W);
 	}
+	/* Update the memory to the chip */
+	__dpa_thread_fence(__DPA_MEMORY, __DPA_W, __DPA_W);
+	/* Arming cq for next packet */
+	flexio_dev_cq_arm(app_ctx.rq_cq_ctx.cq_idx, app_ctx.rq_cq_ctx.cq_number);
 
-	/* CQ is empty (HW owns all remaining CQEs).
-	 * Arm CQ to get interrupt when next packet arrives.
-	 */
-	flexio_dev_cq_arm(app_ctx.rq_cq_ctx.cq_idx,
-			  app_ctx.rq_cq_ctx.cq_number);
-
-	/* Reschedule this thread: yield control to DPA scheduler.
-	 * Thread will be re-woken by CQ interrupt on next packet.
-	 */
+	/* Reschedule the thread */
 	flexio_dev_thread_reschedule();
 }
