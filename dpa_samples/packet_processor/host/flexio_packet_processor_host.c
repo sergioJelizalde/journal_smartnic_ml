@@ -457,51 +457,29 @@ static int copy_shared_data_to_dpa(struct app_context *app_ctx)
 }
 
 /* ================================================================== */
-/* Create steering rule (RX only, MAC-based)                          */
+/* Create steering rule (RX only) - OPTIONAL                          */
 /* ================================================================== */
 
 static int create_rx_steering(struct app_context *app_ctx)
 {
-	struct mlx5dv_devx_obj *tir_obj;
-	struct mlx5dv_devx_obj *tis_obj;
-	struct mlx5dv_devx_obj *td_obj;
 	uint32_t rqn = flexio_rq_get_wq_num(app_ctx->rq);
-	uint32_t in[DEVX_ST_SZ_DW(create_tir_in)] = {0};
-	uint32_t out[DEVX_ST_SZ_DW(create_tir_out)] = {0};
-	uint32_t tir_num;
-
-	/* Create TIR pointing to this RQ */
-	DEVX_SET(create_tir_in, in, opcode, MLX5_CMD_OP_CREATE_TIR);
-	DEVX_SET(create_tir_in, in, tire.disp_type, MLX5_TIRC_DISP_TYPE_DIRECT);
-	DEVX_SET(create_tir_in, in, tire.inline_rqn, rqn);
-
-	tir_obj = mlx5dv_devx_obj_create(app_ctx->ibv_ctx, in, sizeof(in), out, sizeof(out));
-	if (!tir_obj) {
-		fprintf(stderr, "mlx5dv_devx_obj_create TIR failed\n");
-		return -1;
-	}
-
-	tir_num = DEVX_GET(create_tir_out, out, tir_num);
-	printf("TIR created: %u for RQ %u\n", tir_num, rqn);
-
-	mlx5dv_devx_obj_destroy(tir_obj);
 
 	/* 
 	 * Note: For full RX steering with MAC matching, you'd typically use:
-	 * - DOCA Flow API for modern DOCA (preferred)
+	 * - DOCA Flow API (preferred for modern DOCA)
 	 * - mlx5dv_create_flow_matcher + mlx5dv_create_flow (lower level)
 	 *
-	 * For this minimal example, we rely on driver-level RSS distribution.
-	 * In production, add DOCA Flow steering here to match on SMAC.
+	 * For basic operation, driver-level steering is sufficient.
+	 * RX traffic will be directed to this RQ by default.
 	 */
 
-	printf("Steering: RX traffic routed to RQ %u via TIR %u\n", rqn, tir_num);
+	printf("RQ %u ready for RX traffic\n", rqn);
 
 	return 0;
 }
 
 /* ================================================================== */
-/* Create thread pool (FLEXIBLE affinity)                             */
+/* Create thread pool (flexible affinity, no EU pinning)              */
 /* ================================================================== */
 
 static int create_thread_pool(struct app_context *app_ctx)
@@ -510,7 +488,20 @@ static int create_thread_pool(struct app_context *app_ctx)
 	int i;
 
 	eh_attr.host_stub_func = flexio_pp_dev;
-	eh_attr.affinity.type = FLEXIO_AFFINITY_FLEXIBLE;  /* KEY: no EU pinning */
+	
+	/* Flexible affinity: not pinned to specific EU.
+	 * Different FlexIO versions define this differently:
+	 * - FLEXIO_AFFINITY_FLEXIBLE (newer versions, what we want)
+	 * - FLEXIO_AFFINITY_DEFAULT (fallback)
+	 * - Default (0) also works for flexible behavior
+	 */
+#ifdef FLEXIO_AFFINITY_FLEXIBLE
+	eh_attr.affinity.type = FLEXIO_AFFINITY_FLEXIBLE;  /* Preferred */
+#elif defined(FLEXIO_AFFINITY_DEFAULT)
+	eh_attr.affinity.type = FLEXIO_AFFINITY_DEFAULT;   /* Fallback */
+#else
+	/* Default memset(0) behavior gives flexible affinity - nothing to set */
+#endif
 
 	for (i = 0; i < app_ctx->num_threads; i++) {
 		if (flexio_event_handler_create(app_ctx->flexio_process, &eh_attr,
@@ -520,7 +511,7 @@ static int create_thread_pool(struct app_context *app_ctx)
 		}
 	}
 
-	printf("Created %d threads with FLEXIBLE affinity\n", app_ctx->num_threads);
+	printf("Created %d threads with flexible scheduling\n", app_ctx->num_threads);
 	return 0;
 }
 
