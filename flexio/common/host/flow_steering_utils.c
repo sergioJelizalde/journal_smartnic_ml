@@ -31,11 +31,24 @@
 
 /* Source file with functions for Flow Steering Rules tables */
 
+/* MODIFIED from the original sample:
+ * - RX no longer matches on source MAC. It matches IPv4 + TCP + dst port
+ *   LATGEN_TCP_DPORT (443), so latgen traffic is steered to the FlexIO RQ
+ *   regardless of MAC, while ARP/LLDP/broadcast noise falls through to the
+ *   default path.
+ * - TX no longer matches on dest MAC (match-any), so echoes reach the wire
+ *   whatever MACs the DPA writes.
+ * - smac/dmac parameters are kept for API compatibility but ignored.
+ */
+
 #include <malloc.h>
 #include <stdint.h>
 #include <assert.h>
 
 #include "flow_steering_utils.h"
+
+/* MODIFIED: TCP destination port steered to the FlexIO RQ (latgen -d port). */
+#define LATGEN_TCP_DPORT 443
 
 enum matcher_criteria {
 	MATCHER_CRITERIA_EMPTY = 0,
@@ -157,8 +170,9 @@ static struct flow_matcher
 		goto error;
 	}
 
+	/* MODIFIED: empty criteria -> TX matcher matches every packet. */
 	flow_match->dr_matcher_root = mlx5dv_dr_matcher_create(flow_match->dr_table_root, 0,
-							       MATCHER_CRITERIA_OUTER, match_mask);
+							       MATCHER_CRITERIA_EMPTY, match_mask);
 	if (!flow_match->dr_matcher_root) {
 		fprintf(stderr, "Fail creating dr_matcher_root (errno %d)\n", errno);
 		goto error;
@@ -170,8 +184,9 @@ static struct flow_matcher
 		goto error;
 	}
 
+	/* MODIFIED: empty criteria here as well. */
 	flow_match->dr_matcher_sws = mlx5dv_dr_matcher_create(flow_match->dr_table_sws, 0,
-							      MATCHER_CRITERIA_OUTER, match_mask);
+							      MATCHER_CRITERIA_EMPTY, match_mask);
 	if (!flow_match->dr_matcher_sws) {
 		fprintf(stderr, "Fail creating dr_matcher_sws (errno %d)\n", errno);
 		goto error;
@@ -292,8 +307,12 @@ struct flow_matcher *create_matcher_rx(struct ibv_context *ibv_ctx)
 	assert(match_mask);
 
 	match_mask->match_sz = MATCH_VAL_BSIZE;
-	DEVX_SET(dr_match_spec, match_mask->match_buf, smac_47_16, 0xffffffff);
-	DEVX_SET(dr_match_spec, match_mask->match_buf, smac_15_0, 0xffff);
+	/* MODIFIED: was smac_47_16/smac_15_0. Now MAC-agnostic:
+	 * match on ethertype + IP protocol + TCP dst port.
+	 */
+	DEVX_SET(dr_match_spec, match_mask->match_buf, ethertype, 0xffff);
+	DEVX_SET(dr_match_spec, match_mask->match_buf, ip_protocol, 0xff);
+	DEVX_SET(dr_match_spec, match_mask->match_buf, tcp_dport, 0xffff);
 
 	matcher = create_flow_matcher_sw_steer_rx(ibv_ctx, match_mask,
 						  MLX5DV_DR_DOMAIN_TYPE_NIC_RX);
@@ -314,8 +333,9 @@ struct flow_matcher *create_matcher_tx(struct ibv_context *ibv_ctx)
 	assert(match_mask);
 
 	match_mask->match_sz = MATCH_VAL_BSIZE;
-	DEVX_SET(dr_match_spec, match_mask->match_buf, dmac_47_16, 0xffffffff);
-	DEVX_SET(dr_match_spec, match_mask->match_buf, dmac_15_0, 0xffff);
+	/* MODIFIED: was dmac_47_16/dmac_15_0. Mask left all-zero ->
+	 * TX matches every packet the DPA sends.
+	 */
 	matcher = create_flow_matcher_sw_steer_tx(ibv_ctx, match_mask, MLX5DV_DR_DOMAIN_TYPE_FDB);
 	free(match_mask);
 
@@ -329,14 +349,18 @@ struct flow_rule *create_rule_rx_mac_match(struct flow_matcher *flow_match,
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
+	(void)smac; /* MODIFIED: ignored, matching on port instead of MAC */
+
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	DEVX_SET(dr_match_spec, match_value->match_buf, smac_47_16, smac >> 16);
-	DEVX_SET(dr_match_spec, match_value->match_buf, smac_15_0, smac % (1 << 16));
+	/* MODIFIED: was smac_47_16/smac_15_0. Steer IPv4 + TCP + dport 443. */
+	DEVX_SET(dr_match_spec, match_value->match_buf, ethertype, 0x0800);
+	DEVX_SET(dr_match_spec, match_value->match_buf, ip_protocol, 6);
+	DEVX_SET(dr_match_spec, match_value->match_buf, tcp_dport, LATGEN_TCP_DPORT);
 	flow_rule = create_flow_rule_rx(flow_match, tir_obj, match_value);
 	free(match_value);
 
@@ -349,14 +373,15 @@ struct flow_rule *create_rule_tx_fwd_to_vport(struct flow_matcher *flow_match, u
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
+	(void)dmac; /* MODIFIED: ignored, TX rule matches any packet */
+
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_47_16, dmac >> 16);
-	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_15_0, dmac % (1 << 16));
+	/* MODIFIED: was dmac_47_16/dmac_15_0. Value left all-zero. */
 	flow_rule = create_flow_rule_tx(flow_match, match_value);
 	free(match_value);
 
@@ -369,14 +394,15 @@ struct flow_rule *create_rule_tx_fwd_to_sws_table(struct flow_matcher *flow_matc
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
+	(void)dmac; /* MODIFIED: ignored, TX rule matches any packet */
+
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_47_16, dmac >> 16);
-	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_15_0, dmac % (1 << 16));
+	/* MODIFIED: was dmac_47_16/dmac_15_0. Value left all-zero. */
 	flow_rule = create_flow_rule_tx_table(flow_match, match_value);
 	free(match_value);
 
