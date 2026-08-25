@@ -3,17 +3,33 @@
  * Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * (license text unchanged — keep the original header from the sample)
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* Source file with functions for Flow Steering Rules tables.
- *
- * MODIFIED: all matchers/rules are match-ANY (empty criteria, zeroed
- * mask/value). Every packet arriving on the ibv device is steered to the
- * FlexIO RQ regardless of MAC, and every packet sent by the DPA is
- * forwarded to the wire regardless of MAC. The smac/dmac parameters are
- * kept for API compatibility but ignored.
- */
+/* Source file with functions for Flow Steering Rules tables */
 
 #include <malloc.h>
 #include <stdint.h>
@@ -107,9 +123,8 @@ static struct flow_matcher
 		goto error;
 	}
 
-	/* MODIFIED: empty criteria -> matcher matches every packet. */
 	flow_match->dr_matcher_root = mlx5dv_dr_matcher_create(flow_match->dr_table_root, 0,
-							       MATCHER_CRITERIA_EMPTY, match_mask);
+							       MATCHER_CRITERIA_OUTER, match_mask);
 	if (!flow_match->dr_matcher_root) {
 		fprintf(stderr, "Fail creating dr_matcher (errno %d)\n", errno);
 		goto error;
@@ -142,9 +157,8 @@ static struct flow_matcher
 		goto error;
 	}
 
-	/* MODIFIED: empty criteria -> matcher matches every packet. */
 	flow_match->dr_matcher_root = mlx5dv_dr_matcher_create(flow_match->dr_table_root, 0,
-							       MATCHER_CRITERIA_EMPTY, match_mask);
+							       MATCHER_CRITERIA_OUTER, match_mask);
 	if (!flow_match->dr_matcher_root) {
 		fprintf(stderr, "Fail creating dr_matcher_root (errno %d)\n", errno);
 		goto error;
@@ -156,9 +170,8 @@ static struct flow_matcher
 		goto error;
 	}
 
-	/* MODIFIED: empty criteria here as well. */
 	flow_match->dr_matcher_sws = mlx5dv_dr_matcher_create(flow_match->dr_table_sws, 0,
-							      MATCHER_CRITERIA_EMPTY, match_mask);
+							      MATCHER_CRITERIA_OUTER, match_mask);
 	if (!flow_match->dr_matcher_sws) {
 		fprintf(stderr, "Fail creating dr_matcher_sws (errno %d)\n", errno);
 		goto error;
@@ -279,9 +292,8 @@ struct flow_matcher *create_matcher_rx(struct ibv_context *ibv_ctx)
 	assert(match_mask);
 
 	match_mask->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: mask left all-zero -> match any packet.
-	 * (was: DEVX_SET smac_47_16 / smac_15_0)
-	 */
+	DEVX_SET(dr_match_spec, match_mask->match_buf, smac_47_16, 0xffffffff);
+	DEVX_SET(dr_match_spec, match_mask->match_buf, smac_15_0, 0xffff);
 
 	matcher = create_flow_matcher_sw_steer_rx(ibv_ctx, match_mask,
 						  MLX5DV_DR_DOMAIN_TYPE_NIC_RX);
@@ -302,9 +314,8 @@ struct flow_matcher *create_matcher_tx(struct ibv_context *ibv_ctx)
 	assert(match_mask);
 
 	match_mask->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: mask left all-zero -> match any packet.
-	 * (was: DEVX_SET dmac_47_16 / dmac_15_0)
-	 */
+	DEVX_SET(dr_match_spec, match_mask->match_buf, dmac_47_16, 0xffffffff);
+	DEVX_SET(dr_match_spec, match_mask->match_buf, dmac_15_0, 0xffff);
 	matcher = create_flow_matcher_sw_steer_tx(ibv_ctx, match_mask, MLX5DV_DR_DOMAIN_TYPE_FDB);
 	free(match_mask);
 
@@ -318,15 +329,14 @@ struct flow_rule *create_rule_rx_mac_match(struct flow_matcher *flow_match,
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
-	(void)smac; /* MODIFIED: ignored, rule matches any packet */
-
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: value left all-zero to stay a subset of the empty mask. */
+	DEVX_SET(dr_match_spec, match_value->match_buf, smac_47_16, smac >> 16);
+	DEVX_SET(dr_match_spec, match_value->match_buf, smac_15_0, smac % (1 << 16));
 	flow_rule = create_flow_rule_rx(flow_match, tir_obj, match_value);
 	free(match_value);
 
@@ -339,15 +349,14 @@ struct flow_rule *create_rule_tx_fwd_to_vport(struct flow_matcher *flow_match, u
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
-	(void)dmac; /* MODIFIED: ignored, rule matches any packet */
-
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: value left all-zero. */
+	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_47_16, dmac >> 16);
+	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_15_0, dmac % (1 << 16));
 	flow_rule = create_flow_rule_tx(flow_match, match_value);
 	free(match_value);
 
@@ -360,15 +369,14 @@ struct flow_rule *create_rule_tx_fwd_to_sws_table(struct flow_matcher *flow_matc
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
-	(void)dmac; /* MODIFIED: ignored, rule matches any packet */
-
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: value left all-zero. */
+	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_47_16, dmac >> 16);
+	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_15_0, dmac % (1 << 16));
 	flow_rule = create_flow_rule_tx_table(flow_match, match_value);
 	free(match_value);
 
