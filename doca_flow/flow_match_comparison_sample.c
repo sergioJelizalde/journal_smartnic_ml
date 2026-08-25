@@ -25,6 +25,8 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <stdlib.h>
 
 #include <doca_log.h>
 #include <doca_flow.h>
@@ -37,6 +39,22 @@
 #define IP_TCP_DEFAULT_HDR_LEN 40
 
 DOCA_LOG_REGISTER(FLOW_MATCH_COMPARISON);
+
+/* Global flag for signal handling */
+static volatile sig_atomic_t should_exit = 0;
+
+/*
+ * Signal handler for graceful shutdown
+ *
+ * @sig [in]: signal number
+ */
+static void signal_handler(int sig)
+{
+	if (sig == SIGINT || sig == SIGTERM) {
+		DOCA_LOG_INFO("Received signal %d, initiating graceful shutdown", sig);
+		should_exit = 1;
+	}
+}
 
 /*
  * Create DOCA Flow pipe with changeable match on meta data
@@ -333,7 +351,7 @@ static doca_error_t add_sum_to_meta_pipe_entry(struct doca_flow_pipe *pipe, stru
 }
 
 /*
- * Run flow_match_comparison sample
+ * Run flow_match_comparison sample with graceful shutdown on Ctrl+C
  *
  * @nb_queues [in]: number of queues the sample will use
  * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise.
@@ -353,6 +371,12 @@ doca_error_t flow_match_comparison(int nb_queues)
 	doca_error_t result;
 	int port_id;
 
+	/* Register signal handlers for graceful shutdown */
+	signal(SIGINT, signal_handler);
+	signal(SIGTERM, signal_handler);
+
+	DOCA_LOG_INFO("Starting flow_match_comparison sample (press Ctrl+C to stop)");
+
 	result = init_doca_flow(nb_queues, "vnf,hws", &resource, nr_shared_resources);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to init DOCA Flow: %s", doca_error_get_descr(result));
@@ -368,6 +392,11 @@ doca_error_t flow_match_comparison(int nb_queues)
 	}
 
 	for (port_id = 0; port_id < nb_ports; port_id++) {
+		if (should_exit) {
+			DOCA_LOG_INFO("Exiting setup loop due to signal");
+			break;
+		}
+
 		memset(&status, 0, sizeof(status));
 
 		result = create_match_meta_pipe(ports[port_id], port_id, &match_meta_pipe);
@@ -432,12 +461,26 @@ doca_error_t flow_match_comparison(int nb_queues)
 			doca_flow_destroy();
 			return DOCA_ERROR_BAD_STATE;
 		}
+
+		DOCA_LOG_INFO("Port %d configured successfully", port_id);
 	}
 
-	DOCA_LOG_INFO("Wait few seconds for packets to arrive");
-	sleep(5);
+	/* Main processing loop - continues until Ctrl+C */
+	DOCA_LOG_INFO("Processing packets (Ctrl+C to stop)");
+	while (!should_exit) {
+		/* Allow graceful interruption - check signal status periodically */
+		usleep(100000);  /* 100ms sleep to avoid busy-waiting */
+	}
+
+	DOCA_LOG_INFO("Cleaning up and shutting down");
 
 	result = stop_doca_flow_ports(nb_ports, ports);
+	if (result != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to stop ports: %s", doca_error_get_descr(result));
+	}
+
 	doca_flow_destroy();
-	return result;
+
+	DOCA_LOG_INFO("Shutdown complete");
+	return DOCA_SUCCESS;
 }
