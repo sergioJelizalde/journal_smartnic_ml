@@ -31,35 +31,11 @@
 
 /* Source file with functions for Flow Steering Rules tables */
 
-/* MODIFIED from the original sample:
- * - RX no longer matches on source MAC. Two matchers/rules on the root RX
- *   table steer IPv4/TCP packets with EITHER dst port LATGEN_TCP_PORT OR
- *   src port LATGEN_TCP_PORT to the FlexIO RQ (DR rules are AND-only, so
- *   an OR needs two rules). ARP/LLDP/broadcast noise misses both and falls
- *   through to the default path.
- *   The second matcher is stored in the flow_matcher's dr_matcher_sws slot
- *   (unused on RX in the original sample); the second rule and its action
- *   are file-scope statics released in destroy_matcher(). No changes needed
- *   in flow_steering_utils.h or main.c.
- * - TX no longer matches on dest MAC (match-any), so echoes reach the wire
- *   whatever MACs the DPA writes.
- * - smac/dmac parameters are kept for API compatibility but ignored.
- */
-
 #include <malloc.h>
 #include <stdint.h>
 #include <assert.h>
 
 #include "flow_steering_utils.h"
-
-/* MODIFIED: TCP port (either direction) steered to the FlexIO RQ. */
-#define LATGEN_TCP_PORT 443
-
-/* MODIFIED: second RX rule (src-port match) kept at file scope so the
- * flow_rule struct and the sample's cleanup flow stay unchanged.
- */
-static struct mlx5dv_dr_rule   *g_rx_rule_sport;
-static struct mlx5dv_dr_action *g_rx_action_sport;
 
 enum matcher_criteria {
 	MATCHER_CRITERIA_EMPTY = 0,
@@ -131,10 +107,7 @@ static struct flow_matcher
 	flow_match = (struct flow_matcher *)calloc(1, sizeof(*flow_match));
 	assert(flow_match);
 
-	/* SW steering table is not used for RX steering.
-	 * MODIFIED: dr_matcher_sws is reused below (in create_matcher_rx)
-	 * for the second (src-port) RX matcher on the root table.
-	 */
+	/* SW steering table and matcher are not used for RX steering */
 	flow_match->dr_table_sws = NULL;
 	flow_match->dr_matcher_sws = NULL;
 
@@ -184,9 +157,8 @@ static struct flow_matcher
 		goto error;
 	}
 
-	/* MODIFIED: empty criteria -> TX matcher matches every packet. */
 	flow_match->dr_matcher_root = mlx5dv_dr_matcher_create(flow_match->dr_table_root, 0,
-							       MATCHER_CRITERIA_EMPTY, match_mask);
+							       MATCHER_CRITERIA_OUTER, match_mask);
 	if (!flow_match->dr_matcher_root) {
 		fprintf(stderr, "Fail creating dr_matcher_root (errno %d)\n", errno);
 		goto error;
@@ -198,9 +170,8 @@ static struct flow_matcher
 		goto error;
 	}
 
-	/* MODIFIED: empty criteria here as well. */
 	flow_match->dr_matcher_sws = mlx5dv_dr_matcher_create(flow_match->dr_table_sws, 0,
-							      MATCHER_CRITERIA_EMPTY, match_mask);
+							      MATCHER_CRITERIA_OUTER, match_mask);
 	if (!flow_match->dr_matcher_sws) {
 		fprintf(stderr, "Fail creating dr_matcher_sws (errno %d)\n", errno);
 		goto error;
@@ -321,36 +292,11 @@ struct flow_matcher *create_matcher_rx(struct ibv_context *ibv_ctx)
 	assert(match_mask);
 
 	match_mask->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: was smac_47_16/smac_15_0. Matcher #1 (priority 0):
-	 * ethertype + IP protocol + TCP dst port.
-	 */
-	DEVX_SET(dr_match_spec, match_mask->match_buf, ethertype, 0xffff);
-	DEVX_SET(dr_match_spec, match_mask->match_buf, ip_protocol, 0xff);
-	DEVX_SET(dr_match_spec, match_mask->match_buf, tcp_dport, 0xffff);
+	DEVX_SET(dr_match_spec, match_mask->match_buf, smac_47_16, 0xffffffff);
+	DEVX_SET(dr_match_spec, match_mask->match_buf, smac_15_0, 0xffff);
 
 	matcher = create_flow_matcher_sw_steer_rx(ibv_ctx, match_mask,
 						  MLX5DV_DR_DOMAIN_TYPE_NIC_RX);
-	if (!matcher) {
-		free(match_mask);
-		return NULL;
-	}
-
-	/* MODIFIED: matcher #2 (priority 1) on the same root table:
-	 * ethertype + IP protocol + TCP src port. Stored in the
-	 * dr_matcher_sws slot, which the original RX flow leaves NULL.
-	 * A packet missing matcher #1's rule is evaluated against this one,
-	 * giving OR semantics across the two rules.
-	 */
-	memset(match_mask->match_buf, 0, MATCH_VAL_BSIZE);
-	DEVX_SET(dr_match_spec, match_mask->match_buf, ethertype, 0xffff);
-	DEVX_SET(dr_match_spec, match_mask->match_buf, ip_protocol, 0xff);
-	DEVX_SET(dr_match_spec, match_mask->match_buf, tcp_sport, 0xffff);
-
-	matcher->dr_matcher_sws = mlx5dv_dr_matcher_create(matcher->dr_table_root, 1,
-							   MATCHER_CRITERIA_OUTER, match_mask);
-	if (!matcher->dr_matcher_sws)
-		fprintf(stderr, "Fail creating RX sport matcher (errno %d)\n", errno);
-
 	free(match_mask);
 
 	return matcher;
@@ -368,9 +314,8 @@ struct flow_matcher *create_matcher_tx(struct ibv_context *ibv_ctx)
 	assert(match_mask);
 
 	match_mask->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: was dmac_47_16/dmac_15_0. Mask left all-zero ->
-	 * TX matches every packet the DPA sends.
-	 */
+	DEVX_SET(dr_match_spec, match_mask->match_buf, dmac_47_16, 0xffffffff);
+	DEVX_SET(dr_match_spec, match_mask->match_buf, dmac_15_0, 0xffff);
 	matcher = create_flow_matcher_sw_steer_tx(ibv_ctx, match_mask, MLX5DV_DR_DOMAIN_TYPE_FDB);
 	free(match_mask);
 
@@ -384,45 +329,15 @@ struct flow_rule *create_rule_rx_mac_match(struct flow_matcher *flow_match,
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
-	(void)smac; /* MODIFIED: ignored, matching on port instead of MAC */
-
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: was smac_47_16/smac_15_0.
-	 * Rule #1: IPv4 + TCP + dst port LATGEN_TCP_PORT -> FlexIO RQ TIR.
-	 */
-	DEVX_SET(dr_match_spec, match_value->match_buf, ethertype, 0x0800);
-	DEVX_SET(dr_match_spec, match_value->match_buf, ip_protocol, 6);
-	DEVX_SET(dr_match_spec, match_value->match_buf, tcp_dport, LATGEN_TCP_PORT);
+	DEVX_SET(dr_match_spec, match_value->match_buf, smac_47_16, smac >> 16);
+	DEVX_SET(dr_match_spec, match_value->match_buf, smac_15_0, smac % (1 << 16));
 	flow_rule = create_flow_rule_rx(flow_match, tir_obj, match_value);
-
-	/* MODIFIED: rule #2 on the sport matcher:
-	 * IPv4 + TCP + src port LATGEN_TCP_PORT -> same RQ (own TIR action,
-	 * so each rule/action pair tears down independently).
-	 */
-	if (flow_rule && flow_match->dr_matcher_sws) {
-		memset(match_value->match_buf, 0, MATCH_VAL_BSIZE);
-		DEVX_SET(dr_match_spec, match_value->match_buf, ethertype, 0x0800);
-		DEVX_SET(dr_match_spec, match_value->match_buf, ip_protocol, 6);
-		DEVX_SET(dr_match_spec, match_value->match_buf, tcp_sport, LATGEN_TCP_PORT);
-
-		g_rx_action_sport = mlx5dv_dr_action_create_dest_devx_tir(tir_obj);
-		if (!g_rx_action_sport) {
-			fprintf(stderr, "Failed creating sport TIR action (errno %d).\n", errno);
-		} else {
-			g_rx_rule_sport = mlx5dv_dr_rule_create(flow_match->dr_matcher_sws,
-								match_value, 1,
-								&g_rx_action_sport);
-			if (!g_rx_rule_sport)
-				fprintf(stderr, "Fail creating sport dr_rule (errno %d).\n",
-					errno);
-		}
-	}
-
 	free(match_value);
 
 	return flow_rule;
@@ -434,15 +349,14 @@ struct flow_rule *create_rule_tx_fwd_to_vport(struct flow_matcher *flow_match, u
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
-	(void)dmac; /* MODIFIED: ignored, TX rule matches any packet */
-
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: was dmac_47_16/dmac_15_0. Value left all-zero. */
+	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_47_16, dmac >> 16);
+	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_15_0, dmac % (1 << 16));
 	flow_rule = create_flow_rule_tx(flow_match, match_value);
 	free(match_value);
 
@@ -455,15 +369,14 @@ struct flow_rule *create_rule_tx_fwd_to_sws_table(struct flow_matcher *flow_matc
 	struct flow_rule *flow_rule;
 	int match_value_size;
 
-	(void)dmac; /* MODIFIED: ignored, TX rule matches any packet */
-
 	/* mask & match value */
 	match_value_size = sizeof(*match_value) + MATCH_VAL_BSIZE;
 	match_value = (struct mlx5dv_flow_match_parameters *)calloc(1, match_value_size);
 	assert(match_value);
 
 	match_value->match_sz = MATCH_VAL_BSIZE;
-	/* MODIFIED: was dmac_47_16/dmac_15_0. Value left all-zero. */
+	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_47_16, dmac >> 16);
+	DEVX_SET(dr_match_spec, match_value->match_buf, dmac_15_0, dmac % (1 << 16));
 	flow_rule = create_flow_rule_tx_table(flow_match, match_value);
 	free(match_value);
 
@@ -474,39 +387,19 @@ int destroy_matcher(struct flow_matcher *matcher)
 {
 	int err;
 
-	/* MODIFIED: release the second RX rule/action before its matcher.
-	 * Statics are NULL for the TX matcher, so this only runs once.
-	 */
-	if (g_rx_rule_sport) {
-		err = mlx5dv_dr_rule_destroy(g_rx_rule_sport);
-		if (err)
-			return err;
-		g_rx_rule_sport = NULL;
-	}
-	if (g_rx_action_sport) {
-		err = mlx5dv_dr_action_destroy(g_rx_action_sport);
-		if (err)
-			return err;
-		g_rx_action_sport = NULL;
-	}
-
 	err = mlx5dv_dr_matcher_destroy(matcher->dr_matcher_root);
 	if (err)
 		return err;
 
-	/* MODIFIED: destroy dr_matcher_sws before the tables. On RX it lives
-	 * on dr_table_root (original code destroyed it after, which was fine
-	 * only while it lived on dr_table_sws as in the TX case).
-	 */
+	err = mlx5dv_dr_table_destroy(matcher->dr_table_root);
+	if (err)
+		return err;
+
 	if (matcher->dr_matcher_sws) {
 		err = mlx5dv_dr_matcher_destroy(matcher->dr_matcher_sws);
 		if (err)
 			return err;
 	}
-
-	err = mlx5dv_dr_table_destroy(matcher->dr_table_root);
-	if (err)
-		return err;
 
 	if (matcher->dr_table_sws) {
 		err = mlx5dv_dr_table_destroy(matcher->dr_table_sws);
