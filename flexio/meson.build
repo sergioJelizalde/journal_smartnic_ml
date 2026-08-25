@@ -103,6 +103,7 @@ endif
 samples = [
 	'flexio_rpc',
 	'packet_processor',
+        'dpa_inference',
 ]
 
 # Build common host and device side libraries

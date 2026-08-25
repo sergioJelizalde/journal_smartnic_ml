@@ -30,7 +30,7 @@
 
 # The meson file for build packet processor sample
 
-dev_app_name = 'flexio_pp_app'
+dev_app_name = 'flexio_inf_app'
 shared_include_files = [join_paths(meson.current_source_dir(),'flexio_packet_processor_com.h')]
 subdir('dev')
 subdir('host')
