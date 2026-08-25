@@ -216,7 +216,7 @@ static struct flexio_mkey *create_dpa_mkey(struct app_context *app_ctx, flexio_u
 }
 
 /* Source MAC address to match for incoming packets. */
-#define SMAC 0xcc40f38f031a
+#define SMAC 0x0208a4d8ff43
 /* Creates steering rules for application.
  * Returns 0 on success and -1 if the allocation was failed.
  * app_ctx - pointer to app_context structure.
