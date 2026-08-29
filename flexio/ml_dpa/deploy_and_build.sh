@@ -144,8 +144,8 @@ if [ -d "${BUILD_DIR}" ]; then
 fi
 
 echo
-echo "-- meson setup ${BUILD_DIR} ${RECONFIGURE} -Denable_all_applications=false -Denable_${APP_NAME}=true"
-meson setup "${BUILD_DIR}" ${RECONFIGURE} -Denable_all_applications=false -Denable_${APP_NAME}=true
+echo "-- (cd ${DOCA_APPS_DIR} && meson setup ${BUILD_DIR} ${RECONFIGURE} -Denable_all_applications=false -Denable_${APP_NAME}=true)"
+(cd "${DOCA_APPS_DIR}" && meson setup "${BUILD_DIR}" ${RECONFIGURE} -Denable_all_applications=false -Denable_${APP_NAME}=true)
 
 echo "-- ninja -C ${BUILD_DIR}"
 ninja -C "${BUILD_DIR}"
