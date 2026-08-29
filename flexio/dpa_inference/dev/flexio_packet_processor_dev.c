@@ -45,6 +45,8 @@
 #include <dpaintrin.h>
 /* Shared header file for packet processor sample */
 #include "../flexio_packet_processor_com.h"
+/* Per-flow ML anomaly scoring, running entirely on the DPA (no PCC/CC dependency) */
+#include "flow_track.h"
 
 /* Mask for CQ index */
 #define CQ_IDX_MASK ((1 << LOG_CQ_DEPTH) - 1)
@@ -59,6 +61,8 @@
 static struct {
 	/* Packet count - used for debug message */
 	uint64_t packets_count;
+	/* Count of packets the ML forest flagged as anomalous, across all flows */
+	uint64_t anomaly_count;
 	/* lkey - local memory key */
 	uint32_t lkey;
 
@@ -67,6 +71,9 @@ static struct {
 	sq_ctx_t sq_ctx;        /* SQ */
 	cq_ctx_t sq_cq_ctx;     /* SQ CQ */
 	dt_ctx_t dt_ctx;        /* SQ Data ring */
+
+	/* Per-flow state for the ML anomaly model (see flow_track.h) */
+	flow_entry_t flow_table[FLOW_TABLE_SIZE];
 } app_ctx;
 
 /* Initialize the app_ctx structure from the host data.
@@ -75,7 +82,12 @@ static struct {
 static void app_ctx_init(struct host2dev_packet_processor_data *data_from_host)
 {
 	app_ctx.packets_count = 0;
+	app_ctx.anomaly_count = 0;
 	app_ctx.lkey = data_from_host->sq_transf.wqd_mkey_id;
+
+	/* Mark every flow-table slot empty; flow_track_update() fills one in on its first hit. */
+	for (uint32_t i = 0; i < FLOW_TABLE_SIZE; i++)
+		app_ctx.flow_table[i].valid = 0;
 
 	/* Set context for RQ's CQ */
 	com_cq_ctx_init(&app_ctx.rq_cq_ctx,
@@ -140,17 +152,32 @@ static void process_packet(void)
 	/* Copy received packet to sq_data as is */
 	memcpy(sq_data, rq_data, data_sz);
 
+	/* Track this flow and score it with the on-DPA ML forest, before any packet
+	 * modification below -- this is pure observation, the packet is always forwarded on. */
+	{
+		uint32_t src_ip, dst_ip;
+		uint16_t src_port, dst_port;
+		uint8_t proto;
+
+		if (flow_track_parse_5tuple((const uint8_t *)sq_data, data_sz, &src_ip, &dst_ip,
+					     &src_port, &dst_port, &proto)) {
+			int32_t feat[FLOW_ML_NUM_FEATURES];
+			int32_t score;
+
+			flow_track_update(app_ctx.flow_table, src_ip, dst_ip, src_port, dst_port,
+					   proto, (uint16_t)data_sz, feat);
+
+			score = flow_ml_forest_infer(feat);
+			if (score > FLOW_ML_ANOMALY_THRESHOLD_FXP16) {
+				app_ctx.anomaly_count++;
+				flexio_dev_print("ML anomaly: score=%d proto=%d size=%d total=%ld\n",
+						  score, proto, data_sz, app_ctx.anomaly_count);
+			}
+		}
+	}
+
 	/* swap mac address */
 	swap_macs(sq_data);
-
-	/* Primitive validation, that packet is our hardcoded */
-	if (data_sz == 65) {
-		/* modify UDP payload */
-		memcpy(sq_data + 0x2a, "  Event demo***************", 65 - 0x2a);
-
-		/* Set hexadecimal value by the index */
-		sq_data[0x2a] = "0123456789abcdef"[app_ctx.dt_ctx.tx_buff_idx & 0xf];
-	}
 
 	/* Take first segment for SQ WQE (3 segments will be used) */
 	swqe = get_next_sqe(&app_ctx.sq_ctx, SQ_IDX_MASK);

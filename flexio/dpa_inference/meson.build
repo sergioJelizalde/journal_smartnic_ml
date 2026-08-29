@@ -31,6 +31,8 @@
 # The meson file for build packet processor sample
 
 dev_app_name = 'flexio_inf_app'
-shared_include_files = [join_paths(meson.current_source_dir(),'flexio_packet_processor_com.h')]
+shared_include_files = [join_paths(meson.current_source_dir(),'flexio_packet_processor_com.h'),
+                         join_paths(meson.current_source_dir(),'dev','flow_track.h'),
+                         join_paths(meson.current_source_dir(),'dev','flow_ml_model.h')]
 subdir('dev')
 subdir('host')
