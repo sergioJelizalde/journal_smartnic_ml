@@ -82,16 +82,10 @@ int main(int argc, char **argv)
 
 	/* Set the default configuration values (Example values) */
 	cfg.wait_time = -1;
-	cfg.role = PCC_ROLE_RP;
-	cfg.app = pcc_rp_rtt_template_app;
+	cfg.app = pcc_rp_ml_cc_app;
 	memcpy(cfg.threads_list, default_pcc_rp_threads_list, sizeof(default_pcc_rp_threads_list));
 	cfg.threads_num = PCC_RP_THREADS_NUM_DEFAULT_VALUE;
-	cfg.probe_packet_format = PCC_DEV_PROBE_PACKET_CCMAD;
 	cfg.remote_sw_handler = false;
-	cfg.hop_limit = IFA2_HOP_LIMIT_DEFAULT_VALUE;
-	cfg.gns = IFA2_GNS_DEFAULT_VALUE;
-	cfg.gns_ignore_value = IFA2_GNS_IGNORE_DEFAULT_VALUE;
-	cfg.gns_ignore_mask = IFA2_GNS_IGNORE_DEFAULT_MASK;
 	strcpy(cfg.coredump_file, PCC_COREDUMP_FILE_DEFAULT_PATH);
 	log_level = LOG_LEVEL_INFO;
 
@@ -161,13 +155,6 @@ int main(int argc, char **argv)
 	result = doca_pcc_start(resources.doca_pcc);
 	if (result != DOCA_SUCCESS) {
 		PRINT_ERROR("Error: Failed to start PCC\n");
-		goto destroy_pcc;
-	}
-
-	/* Send request to device */
-	result = pcc_mailbox_send(&cfg, &resources);
-	if (result != DOCA_SUCCESS) {
-		PRINT_ERROR("Error: Failed to send mailbox request\n");
 		goto destroy_pcc;
 	}
 

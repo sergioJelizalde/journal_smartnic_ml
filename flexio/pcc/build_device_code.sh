@@ -66,37 +66,16 @@ APPLICATION_DPA_ATTRIBUTES="${PCC_APP_DEVICE_SRC_DIR}/dpa_app_attributes.yaml"
 APPLICATION_DPA_ATTRIBUTES_BLOB="${APPLICATION_DEVICE_BUILD_DIR}/${PCC_APP_NAME}_attributes.blob"
 
 # Set source files
-if [ ${PCC_APP_NAME} = "pcc_rp_rtt_template_app" ]
+if [ ${PCC_APP_NAME} = "pcc_rp_ml_cc_app" ]
 then
         DOCA_PCC_DEV_LIB_NAME="doca_pcc_dev"
-        PCC_DEV_RP_RTT_TEMPLATE_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/rtt_template
-        PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_RTT_TEMPLATE_DIR}/*.c`
-        PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_RTT_TEMPLATE_DIR}/algo/*.c`
+        PCC_DEV_RP_ML_CC_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/ml_cc
+        PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_ML_CC_DIR}/*.c`
+        PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_ML_CC_DIR}/algo/*.c`
         PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
-        APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_RTT_TEMPLATE_DIR}/algo"
+        APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_ML_CC_DIR}/algo"
         if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
                 APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
-        fi
-elif [ ${PCC_APP_NAME} = "pcc_rp_switch_telemetry_app" ]
-then
-        DOCA_PCC_DEV_LIB_NAME="doca_pcc_dev"
-        PCC_DEV_RP_SWITCH_TELEM_DIR=${PCC_APP_DEVICE_SRC_DIR}/rp/switch_telemetry
-        PCC_APP_DEVICE_SRCS=`ls ${PCC_DEV_RP_SWITCH_TELEM_DIR}/*.c`
-        PCC_APP_DEVICE_ALGO_SRCS=`ls ${PCC_DEV_RP_SWITCH_TELEM_DIR}/algo/*.c`
-        PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS} ${PCC_APP_DEVICE_ALGO_SRCS}"
-        APP_INC_LIST="${DOCA_INC_LIST} -I${PCC_DEV_RP_SWITCH_TELEM_DIR}/algo"
-        if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
-                APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/rp -I${DOCA_PCC_DIR}/device/adb_gen/"
-        fi
-elif [ ${PCC_APP_NAME} = "pcc_np_switch_telemetry_app" ]
-then
-        DOCA_PCC_DEV_LIB_NAME="doca_pcc_np_dev"
-        PCC_DEV_NP_SWITCH_TELEM_DIR=${PCC_APP_DEVICE_SRC_DIR}/np/switch_telemetry
-        PCC_APP_DEVICE_SRCS=${PCC_DEV_NP_SWITCH_TELEM_DIR}/np_switch_telemetry_dev_main.c
-        PCC_DEVICE_SRC_FILES="${PCC_APP_DEVICE_SRCS}"
-        APP_INC_LIST="${DOCA_INC_LIST}"
-        if [ ${AMALGAMATION_BUILD_MODE} = "true" ]; then
-                APP_INC_LIST="${APP_INC_LIST} -I${DOCA_PCC_DIR}/device/include/np"
         fi
 fi
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025 NVIDIA CORPORATION AND AFFILIATES.  All rights reserved.
+ * Copyright (c) 2026 NVIDIA CORPORATION AND AFFILIATES.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted
  * provided that the following conditions are met:
@@ -23,24 +23,18 @@
  *
  */
 
-#ifndef _TELEM_TEMPLATE_ALGO_PARAMS_H_
-#define _TELEM_TEMPLATE_ALGO_PARAMS_H_
+#ifndef ML_CC_ALGO_PARAMS_H_
+#define ML_CC_ALGO_PARAMS_H_
 
-/* Configurable algorithm parameters */
-/* This parameters are hardcoded and they provide the best set of the parameters for real firmware */
-#define UPDATE_FACTOR (((1 << 16) * 10) / 100) /* 0.08 in fxp16 - maximum multiplicative decrease factor */
-#define BASE_RTT (13000)		       /* Base value of rtt - in nanosec */
-#define NEW_FLOW_RATE (1 << (20))	       /* Rate format in fixed point 20 */
-#define MIN_RATE (1 << (20 - 14))	       /* Rate format in fixed point 20 */
-#define MAX_DELAY (150000)		       /* Maximum delay - in nanosec */
+/* Configurable algorithm parameters, tunable at runtime through the PPCC access register */
+#define EWMA_ALPHA (((1 << 16) * 25) / 100) /* 0.25 in fxp16 - RTT EWMA smoothing factor */
+#define NEW_FLOW_RATE (1 << 20)		    /* Rate assigned to a flow on its first packet (fxp20) */
+#define MIN_RATE (1 << (20 - 14))	    /* Rate floor regardless of model output (fxp20) */
+#define MAX_DELAY (150000)		    /* Absolute RTT (ns) safety net: forces a strong rate cut
+					       independently of the model if ever exceeded */
+#define INITIAL_MIN_RTT (200000)	    /* Initial value for the per-flow running minimum RTT (ns) */
 
-#define UPDATE_FACTOR_MAX (10 * (1 << 16)) /* Maximum value of update factor */
-#define AI_MAX (1 << (20))		   /* Maximum value of AI */
-#define RATE_MAX (1 << (20))		   /* Maximum value of rate */
+#define EWMA_ALPHA_MAX (1 << 16)  /* Maximum value of EWMA_ALPHA */
+#define RATE_MAX (1 << 20)	  /* Maximum value of rate */
 
-#define AI (40) // in bytes
-#define HAI (2 << (20 - 8))
-#define BASE_QLEN (200000) // in Bytes
-#define PORT_BW_G (200)
-
-#endif /* _TELEM_TEMPLATE_ALGO_PARAMS_H_ */
+#endif /* ML_CC_ALGO_PARAMS_H_ */
